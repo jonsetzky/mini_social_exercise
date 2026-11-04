@@ -6,6 +6,35 @@
   <img src="{{ url_for('static', filename='icon.png') }}" alt="Logo" style="height: 64px;" class="mb-4">
 </div>
 
+{% if community and community.public_id == 'introduction' and not (newcomer and request.args.get('introduce') == '1') %}
+<dialog id="introduction-warning" open class="post-warning border rounded p-4 shadow-sm" aria-labelledby="introduction-warning-title" aria-describedby="newcomer-guidance" style="position: static">
+  <div class="card-body">
+    <h2 id="introduction-warning-title" class="h4">Welcome to /c/introduction</h2>
+    {% include 'newcomer_guidance.html.j2' %}
+    <div class="d-flex flex-wrap justify-content-end gap-2">
+      <a href="{{ url_for('feed') }}" class="btn btn-secondary">Back to home</a>
+      <form method="dialog"><button class="btn btn-primary">Enter introduction</button></form>
+    </div>
+  </div>
+</dialog>
+<script>
+  const introductionWarning = document.getElementById('introduction-warning');
+  if (typeof introductionWarning.showModal === 'function') {
+    introductionWarning.close();
+    introductionWarning.style.position = '';
+    introductionWarning.showModal();
+  }
+</script>
+{% endif %}
+
+{% if newcomer and not community %}
+<aside class="col-md-8 mx-auto mb-4 alert alert-info" aria-labelledby="introduce-yourself-title">
+  <h2 id="introduce-yourself-title" class="h4">Introduce yourself</h2>
+  <p>Welcome! Tell us a little about yourself in /c/introduction. Basic questions and mistakes are welcome here.</p>
+  <a class="btn btn-primary" href="{{ url_for('community_page', public_id='introduction', introduce=1) }}#new-post">Introduce yourself</a>
+</aside>
+{% endif %}
+
 {% if community %}
 <div class="col-md-8 mx-auto mb-4">
   <h1>/c/{{ community.public_id }}</h1>
@@ -20,37 +49,72 @@
   {% if session.get('user_id') and community.public_id != 'wilderness' %}
     {% if membership %}
       <form method="post" action="{{ url_for('community_action', public_id=community.public_id, action='leave') }}"><button class="btn btn-secondary">Leave</button></form>
+      {% if community.public_id != 'introduction' %}
       <form method="post" action="{{ url_for('community_action', public_id=community.public_id, action='nickname') }}" class="mt-2">
         <label for="nickname">Community nickname</label>
         <input id="nickname" name="nickname" maxlength="50" value="{{ membership.nickname or '' }}">
         <button class="btn btn-primary">Save nickname</button>
       </form>
+      {% endif %}
     {% else %}
       <form method="post" action="{{ url_for('community_action', public_id=community.public_id, action='join') }}"><button class="btn btn-primary">Join</button></form>
     {% endif %}
   {% endif %}
 </div>
 {% endif %}
-{% if session.get('user_id') %}
+{% if session.get('user_id') and (not community or community.public_id != 'introduction' or newcomer) %}
 <div class="col-md-8 mx-auto mb-4">
   <div class="card shadow-sm">
     <div class="card-body">
-      <h5 class="card-title">Create a new post</h5>
-      <form action="{{ url_for('add_post') }}" method="POST">
+      {% set introduction_selected = community and community.public_id == 'introduction' %}
+      <h5 class="card-title" id="post-form-title">{{ 'Introduce yourself' if introduction_selected else 'Create a new post' }}</h5>
+      <form action="{{ url_for('add_post') }}" method="POST" id="new-post">
         <div class="mb-3">
           <label for="community_id">Community</label>
           <select class="form-select" name="community_id" id="community_id" required>
-            {% for item in communities %}<option value="{{ item.public_id }}" {% if community and community.id == item.id %}selected{% endif %}>/c/{{ item.public_id }}</option>{% endfor %}
+            {% for item in communities if item.public_id != 'introduction' or newcomer %}<option value="{{ item.public_id }}" {% if (community and community.id == item.id) or (not community and newcomer and item.public_id == 'introduction') %}selected{% endif %}>/c/{{ item.public_id }}</option>{% endfor %}
           </select>
         </div>
-        <div class="mb-3">
-          <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
-        </div>
+        {% if introduction_selected %}
+        <fieldset id="introduction-fields" class="mb-3" aria-describedby="introduction-help">
+          <legend class="h6">Tell us a little about yourself</legend>
+          <p id="introduction-help" class="text-muted">Answer whichever questions you like. Share only what you feel comfortable sharing.</p>
+          {% for name, question in introduction_questions %}
+          <div class="mb-3">
+            <label for="{{ name|e }}" class="form-label">{{ question|e }}</label>
+            <textarea id="{{ name|e }}" name="{{ name|e }}" class="form-control" rows="2"></textarea>
+          </div>
+          {% endfor %}
+        </fieldset>
+        {% endif %}
+        <fieldset id="ordinary-post-fields" class="mb-3" {% if introduction_selected %}hidden disabled{% endif %}>
+          <label for="post-content" class="form-label">Your post</label>
+          <textarea id="post-content" class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username')|e }}?" required></textarea>
+        </fieldset>
         <button type="submit" class="btn btn-primary float-end">Post</button>
       </form>
     </div>
   </div>
 </div>
+{% if introduction_selected %}
+<script>
+  const postCommunity = document.getElementById('community_id');
+  const introductionFields = document.getElementById('introduction-fields');
+  const ordinaryPostFields = document.getElementById('ordinary-post-fields');
+  function updatePostForm() {
+    const introducing = postCommunity.value === 'introduction';
+    introductionFields.hidden = !introducing;
+    introductionFields.disabled = !introducing;
+    ordinaryPostFields.hidden = introducing;
+    ordinaryPostFields.disabled = introducing;
+    document.getElementById('post-form-title').textContent = introducing ? 'Introduce yourself' : 'Create a new post';
+  }
+  postCommunity.addEventListener('change', updatePostForm);
+  updatePostForm();
+</script>
+{% endif %}
+{% elif session.get('user_id') and community and community.public_id == 'introduction' %}
+<p class="col-md-8 mx-auto alert alert-info">Introduction posts are for accounts under seven days old that have not introduced themselves yet. You can still read posts and welcome newcomers in the comments.</p>
 {% endif %}
 
 <h2 class="text-center border-bottom pb-2 mb-4"><span>Posts</span></h2>
@@ -107,7 +171,7 @@
       </div>
       
       <p><a href="{{ url_for('community_page', public_id=entry.post.public_id) }}">/c/{{ entry.post.public_id }}</a></p>
-      <p class="mt-2">{{ entry.post.content }}</p>
+      <p class="mt-2{% if entry.post.public_id == 'introduction' %} introduction-post-content{% endif %}">{{ entry.post.content|e if entry.post.public_id == 'introduction' else entry.post.content }}</p>
 
       <!-- Reactions Display and Add Reaction Button -->
       <div class="d-flex align-items-center mt-2 mb-2">

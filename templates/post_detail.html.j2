@@ -24,7 +24,7 @@
       </div>
       
       <p><a href="{{ url_for('community_page', public_id=post.public_id) }}">/c/{{ post.public_id }}</a></p>
-      <p class="card-text mt-2">{{ post.content }}</p>
+      <p class="card-text mt-2{% if post.public_id == 'introduction' %} introduction-post-content{% endif %}">{{ post.content|e if post.public_id == 'introduction' else post.content }}</p>
 
       <!-- Reactions Display and Add Reaction Button (Copied from feed.html.j2) -->
       <div class="d-flex align-items-center mt-2 mb-2">

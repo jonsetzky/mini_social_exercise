@@ -13,6 +13,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
 from clan_tags import award_clan_tags
+from newcomers import INTRODUCTION_QUESTIONS, NEWCOMER_PREDICATE
 import json
 import sqlite3
 import hashlib
@@ -115,6 +116,13 @@ REACTION_EMOJIS = {
 REACTION_TYPES = list(REACTION_EMOJIS.keys())
 
 
+def is_newcomer(user_id):
+    return bool(user_id and query_db(
+        f"SELECT 1 FROM users u WHERE u.id = ? AND {NEWCOMER_PREDICATE}",
+        (user_id,), one=True,
+    ))
+
+
 @app.route("/")
 def feed(community=None):
     #  1. Get Pagination and Filter Parameters
@@ -149,7 +157,7 @@ def feed(community=None):
     if not community:
         where_clause += (
             " AND " if where_clause else "WHERE "
-        ) + "c.public_id != 'wilderness'"
+        ) + "c.show_in_main_feed = 1"
 
     # Add the pagination parameters to the query arguments
     pagination_params = (POSTS_PER_PAGE, offset)
@@ -227,6 +235,8 @@ def feed(community=None):
             (post["id"],),
         )
         post_dict = dict(post)
+        if post_dict["public_id"] == "introduction":
+            post_dict["nickname"] = None
         if post_dict["public_id"] != "wilderness":
             post_dict["content"], _ = moderate_content(post_dict["content"])
         comments_moderated = []
@@ -250,6 +260,8 @@ def feed(community=None):
         posts=posts_data,
         communities=query_db("SELECT * FROM communities ORDER BY public_id"),
         community=community,
+        newcomer=is_newcomer(current_user_id),
+        introduction_questions=INTRODUCTION_QUESTIONS,
         membership=(
             query_db(
                 "SELECT * FROM user_community WHERE user_id=? AND community_id=?",
@@ -305,6 +317,8 @@ def create_community():
 
 @app.route("/c/<public_id>")
 def community_page(public_id):
+    if public_id == "introducton":
+        return redirect(url_for("community_page", public_id="introduction"))
     community = query_db(
         "SELECT * FROM communities WHERE public_id=?", (public_id,), one=True
     )
@@ -324,6 +338,8 @@ def community_action(public_id, action):
     if not community:
         abort(404)
     if public_id == "wilderness" and action in ("join", "nickname"):
+        abort(403)
+    if public_id == "introduction" and action == "nickname":
         abort(403)
     db = get_db()
     if action == "description":
@@ -385,7 +401,6 @@ def add_post():
 
     # Get content from the submitted form
     content = request.form.get("content")
-
     community = query_db(
         "SELECT id FROM communities WHERE public_id = ?",
         (request.form.get("community_id", ""),),
@@ -394,6 +409,20 @@ def add_post():
     if not community:
         flash("Select a valid community.", "warning")
         return redirect(url_for("feed"))
+
+    introduction_post = request.form.get("community_id") == "introduction"
+    if introduction_post and not is_newcomer(user_id):
+        abort(403, description="Introduction posts are only for accounts under seven days old that have not introduced themselves yet.")
+
+    # Keep visible question answers if a user changes communities without JS.
+    if request.form.get("community_id") == "introduction" or not (content and content.strip()):
+        answers = [
+            f"{question}\n{answer}"
+            for name, question in INTRODUCTION_QUESTIONS
+            if (answer := request.form.get(name, "").strip())
+        ]
+        if answers:
+            content = "\n\n".join(answers)
 
     # Use the same moderation decision here as when displaying community posts.
     # Scores of 5.0 or higher require confirmation before being sent to Wilderness.
@@ -407,13 +436,36 @@ def add_post():
         token = URLSafeTimedSerializer(app.secret_key, salt="post-confirmation").dumps({"content": content, "community_id": request.form.get("community_id"), "nonce": nonce, "user_id": user_id})
         return render_template("post_warning.html.j2", content=content, community_id=request.form.get("community_id"), segments=highlight_segments(content), confirmation=token)
 
+    if content and content.strip() and severe_matches(content):
+        if not query_db("SELECT id FROM communities WHERE public_id = 'wilderness'", one=True):
+            flash("Wilderness is unavailable; your post was not created.", "warning")
+            return render_template("post_warning.html.j2", content=content, community_id=request.form.get("community_id"), unavailable=True)
+        nonce = secrets.token_urlsafe(32)
+        session["pending_post_nonce"] = nonce
+        token = URLSafeTimedSerializer(app.secret_key, salt="post-confirmation").dumps({"content": content, "community_id": request.form.get("community_id"), "nonce": nonce, "user_id": user_id})
+        return render_template("post_warning.html.j2", content=content, community_id=request.form.get("community_id"), segments=highlight_segments(content), confirmation=token)
+
     # Basic validation to ensure post is not empty
     if content and content.strip():
         db = get_db()
-        db.execute(
-            "INSERT INTO posts (user_id, content, community_id) VALUES (?, ?, ?)",
-            (user_id, content, community["id"]),
-        )
+        if introduction_post:
+            # Check and insert atomically so concurrent submissions cannot
+            # publish two introductions or bypass the age limit.
+            result = db.execute(
+                f"""INSERT INTO posts (user_id, content, community_id)
+                    SELECT u.id, ?, ? FROM users u
+                    WHERE u.id = ? AND {NEWCOMER_PREDICATE}""",
+                (content, community["id"], user_id),
+            )
+            if not result.rowcount:
+                db.rollback()
+                abort(403, description="You are no longer eligible to post an introduction.")
+            db.execute("INSERT INTO user_introductions (user_id) VALUES (?)", (user_id,))
+        else:
+            db.execute(
+                "INSERT INTO posts (user_id, content, community_id) VALUES (?, ?, ?)",
+                (user_id, content, community["id"]),
+            )
         db.commit()
         flash("Your post was successfully created!", "success")
     else:
@@ -554,6 +606,8 @@ def user_profile(username):
     posts = []
     for post_raw in posts_raw:
         post = dict(post_raw)
+        if post["public_id"] == "introduction":
+            post["nickname"] = None
         moderated_post_content, _ = moderate_content(post["content"])
         post["content"] = moderated_post_content
         posts.append(post)
@@ -680,6 +734,8 @@ def post_detail(post_id):
     #  Moderation for the Main Post
     # Convert the raw database row to a mutable dictionary
     post = dict(post_raw)
+    if post["public_id"] == "introduction":
+        post["nickname"] = None
     # Unpack the tuple from moderate_content, we only need the moderated content string here
     if post["public_id"] != "wilderness":
         post["content"], _ = moderate_content(post["content"])
@@ -746,7 +802,7 @@ def signup():
         cur = db.cursor()
         try:
             cur.execute(
-                "INSERT INTO users (username, password, location, birthdate, profile) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO users (username, password, location, birthdate, profile, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
                 (username, hashed_password, location, birthdate, profile),
             )
             # Create the account and its default membership atomically.
@@ -758,6 +814,14 @@ def signup():
             if cur.rowcount != 1:
                 raise RuntimeError(
                     "General community is missing; run the communities migration."
+                )
+            cur.execute(
+                "INSERT INTO user_community (user_id, community_id) SELECT ?, id FROM communities WHERE public_id = 'introduction'",
+                (new_user_id,),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    "Introduction community is missing; run the communities migration."
                 )
             db.commit()
 
@@ -824,12 +888,55 @@ def add_comment(post_id):
         flash("You must be logged in to comment.", "danger")
         return redirect(url_for("login"))
 
+    post = query_db("SELECT user_id FROM posts WHERE id = ?", (post_id,), one=True)
+    if not post:
+        abort(404)
+
     # Get content from the submitted form
     content = request.form.get("content")
+    confirmed_nonce = None
 
     # Basic validation to ensure comment is not empty
     if content and content.strip():
+        if request.form.get("edit") == "1":
+            return render_template(
+                "newcomer_comment_warning.html.j2", post_id=post_id,
+                content=content, show_warning=False,
+            )
+        serializer = URLSafeTimedSerializer(app.secret_key, salt="newcomer-comment")
+        confirmation = request.form.get("confirmation")
+        if confirmation:
+            try:
+                pending = serializer.loads(confirmation, max_age=900)
+            except BadSignature:
+                abort(400, description="Comment confirmation expired or is invalid. Please submit again.")
+            if (pending.get("user_id") != user_id
+                    or pending.get("post_id") != post_id
+                    or pending.get("content") != content
+                    or not pending.get("nonce")):
+                abort(400, description="Comment confirmation is invalid. Please submit again.")
+            confirmed_nonce = pending["nonce"]
+        elif post["user_id"] != user_id and is_newcomer(post["user_id"]):
+            nonce = secrets.token_urlsafe(24)
+            token = serializer.dumps({
+                "user_id": user_id, "post_id": post_id,
+                "content": content, "nonce": nonce,
+            })
+            return render_template(
+                "newcomer_comment_warning.html.j2", post_id=post_id,
+                content=content, confirmation=token,
+                show_warning=True,
+            )
         db = get_db()
+        if confirmed_nonce:
+            # Consume the token in the same transaction as the comment insert.
+            # This also prevents replay with an older signed session cookie.
+            db.execute("DELETE FROM used_comment_confirmations WHERE created_at < datetime('now', '-1 day')")
+            try:
+                db.execute("INSERT INTO used_comment_confirmations (nonce) VALUES (?)", (confirmed_nonce,))
+            except sqlite3.IntegrityError:
+                db.rollback()
+                abort(400, description="This comment has already been sent.")
         db.execute(
             "INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)",
             (post_id, user_id, content),
@@ -840,8 +947,8 @@ def add_comment(post_id):
     else:
         flash("Comment cannot be empty.", "warning")
 
-    # Redirect back to the page the user came from (likely the post detail page)
-    return redirect(request.referrer or url_for("post_detail", post_id=post_id))
+    # The reminder is served from a POST-only URL, so always land on the post.
+    return redirect(url_for("post_detail", post_id=post_id))
 
 
 @app.route("/comments/<int:comment_id>/delete", methods=["POST"])
@@ -1459,7 +1566,7 @@ def recommend(user_id, filter_following):
             "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id=?)"
         )
         params = (user_id,)
-    where += (" AND " if where else "WHERE ") + "c.public_id != 'wilderness'"
+    where += (" AND " if where else "WHERE ") + "c.show_in_main_feed = 1"
     return query_db(
         """SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id,
         c.public_id, uc.nickname FROM posts p JOIN users u ON u.id=p.user_id

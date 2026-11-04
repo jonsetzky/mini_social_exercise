@@ -1,0 +1,43 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="col-md-8 mx-auto card shadow-sm">
+  <div class="card-body">
+    <h1 class="h4">Edit your comment</h1>
+    <form action="{{ url_for('add_comment', post_id=post_id) }}" method="post">
+      <label for="comment-draft" class="form-label">Your comment</label>
+      <textarea id="comment-draft" class="form-control mb-3" name="content" rows="4" required>{{ content|e }}</textarea>
+      <button class="btn btn-primary" type="submit">Review and send</button>
+      <a class="btn btn-secondary" href="{{ url_for('post_detail', post_id=post_id) }}">Back to post</a>
+    </form>
+  </div>
+</div>
+{% if show_warning %}
+<dialog id="newcomer-comment-warning" open class="post-warning border rounded p-4 shadow-sm" aria-labelledby="newcomer-comment-title" aria-describedby="newcomer-guidance" style="position: static">
+  <div class="card-body">
+    <h2 id="newcomer-comment-title" class="h4">You're replying to a newcomer</h2>
+    {% include 'newcomer_guidance.html.j2' %}
+    <p class="text-muted">Take a moment to check that your reply is helpful and kind.</p>
+    <p class="text-break" style="white-space: pre-wrap">{{ content|e }}</p>
+    <form method="post" action="{{ url_for('add_comment', post_id=post_id) }}" class="d-flex flex-wrap gap-2">
+      <input type="hidden" name="content" value="{{ content|e }}">
+      <input type="hidden" name="confirmation" value="{{ confirmation|e }}">
+      <button type="submit" class="btn btn-primary">Send comment kindly</button>
+      <button type="submit" name="edit" value="1" class="btn btn-secondary" id="edit-comment">Cancel and edit</button>
+    </form>
+  </div>
+</dialog>
+<script>
+  const commentWarning = document.getElementById('newcomer-comment-warning');
+  if (typeof commentWarning.showModal === 'function') {
+    commentWarning.close();
+    commentWarning.style.position = '';
+    commentWarning.showModal();
+    document.getElementById('edit-comment').addEventListener('click', event => {
+      event.preventDefault();
+      commentWarning.close();
+      document.getElementById('comment-draft').focus();
+    });
+  }
+</script>
+{% endif %}
+{% endblock %}

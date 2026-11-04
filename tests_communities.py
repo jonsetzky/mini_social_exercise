@@ -57,7 +57,7 @@ class CommunityIntegrationTests(unittest.TestCase):
         self.login(1, 'admin')
         self.client.post('/c/create', data={'public_id':'Bad1'})
         db = sqlite3.connect(self.path)
-        self.assertEqual(db.execute('SELECT count(*) FROM communities').fetchone()[0], 2)
+        self.assertEqual(db.execute('SELECT count(*) FROM communities').fetchone()[0], 3)
         db.close()
     def test_validation_and_following_sorts(self):
         self.login(1, 'admin')

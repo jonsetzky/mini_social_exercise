@@ -44,3 +44,9 @@ Rerun the communities migration after updating to remove any existing wilderness
 After updating, rerun the communities migration to add clan tags and backfill achievements from existing activity.
 
 Rerun the communities migration to ensure that `/c/wilderness` exists for redirected posts.
+
+Rerun the migration after updating to create `/c/introduction` and add existing newcomers once. New accounts automatically join both `general` and `introduction`. A newcomer has an account younger than seven days and has not posted in `introduction`. The homepage invites them to introduce themselves and selects that community by default. Visitors see a kindness reminder when entering introduction, and replies to newcomers require confirmation before publishing (design claims 18, 19 and 21). `/c/introducton` redirects to the canonical spelling.
+
+The homepage always keeps the basic post form. Optional guiding questions appear only inside `/c/introduction`. Only accounts younger than seven days that have never published an introduction may publish there; other users can still browse and welcome newcomers in comments. Deleting an introduction does not restore posting eligibility. The homepage invitation opens the form without the entry reminder; ordinary introduction visits still show it. Nicknames are disabled in introduction. Rerun the migration to backfill introduction history and clear existing introduction nicknames; other community nicknames are preserved.
+
+Rerun the migration to add `communities.show_in_main_feed`. Introduction and wilderness default to `0`; other communities default to `1`. All homepage sorts and Following respect this field, while community pages and direct post links remain available. Change this setting directly in the database; it is not exposed through the user interface. Repeated migrations preserve configured values.
