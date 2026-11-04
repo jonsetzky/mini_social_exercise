@@ -1,0 +1,6 @@
+<h2 id="warning-title" class="text-danger">⚠ DANGER: The Wilderness ⚠</h2>
+<p><strong>Are you sure?</strong> The Wilderness contains unmoderated posts and potentially disturbing language. Turn back now if you want to keep things civilized.</p>
+<div class="d-flex justify-content-end gap-2">
+  <a href="{{ url_for('community_page', public_id='wilderness') }}" class="btn btn-danger">Enter the wilderness</a>
+  {% if request.endpoint == 'community_list' %}<button type="button" id="stay-civilized" class="btn btn-secondary">Stay civilized</button>{% else %}<a href="{{ url_for('community_list') }}" class="btn btn-secondary">Stay civilized</a>{% endif %}
+</div>

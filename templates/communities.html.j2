@@ -9,6 +9,17 @@
 <button class="btn btn-primary">Create community</button>
 </form>
 {% endif %}
-<ul>{% for community in communities %}<li><a href="{{ url_for('community_page', public_id=community.public_id) }}"{% if community.public_id == "wilderness" %} class="btn btn-sm wilderness-community"{% endif %}>/c/{{ community.public_id }}/</a>{% if community.public_id != "wilderness" %} ({{ community.member_count }} {{ "member" if community.member_count == 1 else "members" }}){% endif %}{% if community.description %} — {{ community.description|e }}{% endif %}</li>{% else %}<li>No communities yet.</li>{% endfor %}</ul>
+<ul>{% for community in communities %}<li><a href="{{ url_for('wilderness_warning') if community.public_id == 'wilderness' else url_for('community_page', public_id=community.public_id) }}"{% if community.public_id == "wilderness" %} class="btn btn-sm wilderness-community" id="wilderness-link"{% endif %}>/c/{{ community.public_id }}/</a>{% if community.public_id != "wilderness" %} ({{ community.member_count }} {{ "member" if community.member_count == 1 else "members" }}){% endif %}{% if community.description %} — {{ community.description|e }}{% endif %}</li>{% else %}<li>No communities yet.</li>{% endfor %}</ul>
+<dialog id="wilderness-warning" aria-labelledby="warning-title" class="border border-danger border-4 rounded p-4 shadow" style="width: 50%;">
+  {% include 'wilderness_warning_content.html.j2' %}
+</dialog>
+<script>
+  const wildernessLink = document.getElementById('wilderness-link');
+  const warning = document.getElementById('wilderness-warning');
+  if (wildernessLink && warning && typeof warning.showModal === 'function') {
+    wildernessLink.addEventListener('click', (event) => { event.preventDefault(); warning.showModal(); });
+    document.getElementById('stay-civilized').addEventListener('click', () => warning.close());
+  }
+</script>
 </div>
 {% endblock %}

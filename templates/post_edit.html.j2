@@ -1,0 +1,15 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="col-md-8 mx-auto card shadow-sm">
+  <div class="card-body">
+    <h1 class="h4">Edit your post</h1>
+    <p class="text-muted">Your post has not been published.</p>
+    <form method="post" action="{{ url_for('add_post') }}">
+      <input type="hidden" name="community_id" value="{{ community_id|e }}">
+      <label for="draft" class="form-label">Your draft</label>
+      <textarea class="form-control" id="draft" name="content" rows="6" required>{{ content|e }}</textarea>
+      <button class="btn btn-primary mt-3" type="submit">Review or post</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

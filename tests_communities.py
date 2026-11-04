@@ -57,7 +57,7 @@ class CommunityIntegrationTests(unittest.TestCase):
         self.login(1, 'admin')
         self.client.post('/c/create', data={'public_id':'Bad1'})
         db = sqlite3.connect(self.path)
-        self.assertEqual(db.execute('SELECT count(*) FROM communities').fetchone()[0], 1)
+        self.assertEqual(db.execute('SELECT count(*) FROM communities').fetchone()[0], 2)
         db.close()
     def test_validation_and_following_sorts(self):
         self.login(1, 'admin')
@@ -170,6 +170,43 @@ class CommunityIntegrationTests(unittest.TestCase):
                 self.assertNotIn(b'wilderness-only post', data)
                 self.assertIn(b'general post', data)
         self.assertIn(b'wilderness-only post', self.client.get('/c/wilderness').data)
+    def test_feed_filter_labels_are_uniform_across_sorts(self):
+        from html.parser import HTMLParser
+
+        class FilterLinks(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.links = {}
+                self.href = None
+
+            def handle_starttag(self, tag, attrs):
+                if tag == 'a':
+                    self.href = dict(attrs).get('href')
+                    if self.href:
+                        self.links[self.href] = ''
+
+            def handle_data(self, data):
+                if self.href and 'show=' in self.href:
+                    self.links[self.href] = self.links.get(self.href, '') + data
+
+            def handle_endtag(self, tag):
+                if tag == 'a':
+                    self.href = None
+
+        self.login()
+        for sort in ('new', 'popular', 'recommended'):
+            for show in ('all', 'following'):
+                with self.subTest(sort=sort, show=show):
+                    parser = FilterLinks()
+                    parser.feed(self.client.get('/?sort='+sort+'&show='+show).get_data(as_text=True))
+                    self.assertEqual(parser.links['/?sort='+sort+'&show=all'], 'Communities')
+                    self.assertEqual(parser.links['/?sort='+sort+'&show=following'], 'Following')
+    def test_community_list_warns_before_entering_wilderness(self):
+        page = self.client.get('/c').get_data(as_text=True)
+        self.assertIn('wilderness-warning', page)
+        self.assertIn('Stay civilized', page)
+        self.assertIn('Enter the wilderness', page)
+        self.assertIn('href="/c/wilderness"', page)
     def test_clan_tag_earned_and_retained(self):
         db = sqlite3.connect(self.path)
         db.executemany('INSERT INTO users(id, username) VALUES (?,?)', [(i, 'user'+str(i)) for i in range(3,13)])
@@ -201,7 +238,7 @@ class CommunityIntegrationTests(unittest.TestCase):
         db=sqlite3.connect(self.path); self.assertEqual(db.execute('SELECT count(*) FROM earned_clan_tags').fetchone()[0],1); db.close()
         self.login(); self.assertEqual(self.client.post('/u/alice/clan-tag', data={'community':'general'}).status_code,302)
     def test_admin_can_select_any_tag_for_own_profile(self):
-        db=sqlite3.connect(self.path); db.execute("INSERT INTO users(id,username) VALUES (3,'admin')"); db.execute("INSERT INTO communities(public_id) VALUES ('wilderness')"); db.commit(); db.close()
+        db=sqlite3.connect(self.path); db.execute("INSERT INTO users(id,username) VALUES (3,'admin')"); db.execute("INSERT OR IGNORE INTO communities(public_id) VALUES ('wilderness')"); db.commit(); db.close()
         self.login(3,'admin')
         self.assertEqual(self.client.post('/u/admin/clan-tag',data={'community':'wilderness'}).status_code,302)
         self.assertIn(b'wilderness', self.client.get('/u/admin').data)

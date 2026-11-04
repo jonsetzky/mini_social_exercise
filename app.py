@@ -1,4 +1,14 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g, abort
+from flask import (
+    Flask,
+    render_template,
+    request,
+    redirect,
+    url_for,
+    session,
+    flash,
+    g,
+    abort,
+)
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
@@ -7,26 +17,31 @@ import json
 import sqlite3
 import hashlib
 import re
+import secrets
+from itsdangerous import URLSafeTimedSerializer, BadSignature
 from datetime import datetime
 
 app = Flask(__name__)
-app.secret_key = '123456789' 
-DATABASE = 'database.sqlite'
+app.secret_key = "123456789"
+DATABASE = "database.sqlite"
 
 # Load censorship data
-# WARNING! The censorship.dat file contains disturbing language when decrypted. 
-# If you want to test whether moderation works, 
-# you can trigger censorship using these words: 
+# WARNING! The censorship.dat file contains disturbing language when decrypted.
+# If you want to test whether moderation works,
+# you can trigger censorship using these words:
 # tier1badword, tier2badword, tier3badword
-ENCRYPTED_FILE_PATH = 'censorship.dat'
-fernet = Fernet('xpplx11wZUibz0E8tV8Z9mf-wwggzSrc21uQ17Qq2gg=')
-with open(ENCRYPTED_FILE_PATH, 'rb') as encrypted_file:
+ENCRYPTED_FILE_PATH = "censorship.dat"
+fernet = Fernet("xpplx11wZUibz0E8tV8Z9mf-wwggzSrc21uQ17Qq2gg=")
+with open(ENCRYPTED_FILE_PATH, "rb") as encrypted_file:
     encrypted_data = encrypted_file.read()
 decrypted_data = fernet.decrypt(encrypted_data)
 MODERATION_CONFIG = json.loads(decrypted_data)
-TIER1_WORDS = MODERATION_CONFIG['categories']['tier1_severe_violations']['words']
-TIER2_PHRASES = MODERATION_CONFIG['categories']['tier2_spam_scams']['phrases']
-TIER3_WORDS = MODERATION_CONFIG['categories']['tier3_mild_profanity']['words']
+TIER1_WORDS = MODERATION_CONFIG["categories"]["tier1_severe_violations"]["words"]
+TIER2_PHRASES = MODERATION_CONFIG["categories"]["tier2_spam_scams"]["phrases"]
+TIER3_WORDS = MODERATION_CONFIG["categories"]["tier3_mild_profanity"]["words"]
+# https://uibakery.io/regex-library/url
+URL_PATTERN = r"https?://(?:www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,63}\b(?:[-a-zA-Z0-9()@:%_+.~#?&/=]*)"
+
 
 def get_db():
     """
@@ -34,13 +49,10 @@ def get_db():
     is unique for each request and will be reused if this is called
     again.
     """
-    if 'db' not in g:
-        g.db = sqlite3.connect(
-            DATABASE,
-            detect_types=sqlite3.PARSE_DECLTYPES
-        )
+    if "db" not in g:
+        g.db = sqlite3.connect(DATABASE, detect_types=sqlite3.PARSE_DECLTYPES)
         g.db.row_factory = sqlite3.Row
-        g.db.execute('PRAGMA foreign_keys = ON')
+        g.db.execute("PRAGMA foreign_keys = ON")
 
     return g.db
 
@@ -48,7 +60,7 @@ def get_db():
 @app.teardown_appcontext
 def close_connection(exception):
     """Closes the database again at the end of the request."""
-    db = g.pop('db', None)
+    db = g.pop("db", None)
 
     if db is not None:
         db.close()
@@ -60,19 +72,19 @@ def query_db(query, args=(), one=False, commit=False):
     dictionary, or None. Also handles write operations.
     """
     db = get_db()
-    
+
     # Using 'with' on a connection object implicitly handles transactions.
-    # The 'with' statement will automatically commit if successful, 
+    # The 'with' statement will automatically commit if successful,
     # or rollback if an exception occurs. This is safer.
     try:
         with db:
             cur = db.execute(query, args)
-        
+
         # For SELECT statements, fetch the results after the transaction block
         if not commit:
             rv = cur.fetchall()
             return (rv[0] if rv else None) if one else rv
-        
+
         # For write operations, we might want the cursor to get info like lastrowid
         return cur
 
@@ -80,59 +92,69 @@ def query_db(query, args=(), one=False, commit=False):
         print(f"Database error: {e}")
         return None
 
-@app.template_filter('datetimeformat')
+
+@app.template_filter("datetimeformat")
 def datetimeformat(value):
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, str):
-        dt = datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+        dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
     else:
         return "N/A"
-    return dt.strftime('%b %d, %Y %H:%M')
+    return dt.strftime("%b %d, %Y %H:%M")
+
 
 REACTION_EMOJIS = {
-    'like': '❤️', 'love': '😍', 'laugh': '😂',
-    'wow': '😮', 'sad': '😢', 'angry': '😠',
+    "like": "❤️",
+    "love": "😍",
+    "laugh": "😂",
+    "wow": "😮",
+    "sad": "😢",
+    "angry": "😠",
 }
 REACTION_TYPES = list(REACTION_EMOJIS.keys())
 
 
-@app.route('/')
+@app.route("/")
 def feed(community=None):
-    #  1. Get Pagination and Filter Parameters 
+    #  1. Get Pagination and Filter Parameters
     try:
-        page = int(request.args.get('page', 1))
+        page = int(request.args.get("page", 1))
     except ValueError:
         page = 1
-    sort = request.args.get('sort', 'new').lower()
-    show = request.args.get('show', 'all').lower()
-    
+    sort = request.args.get("sort", "new").lower()
+    show = request.args.get("show", "all").lower()
+
     # Define how many posts to show per page
     POSTS_PER_PAGE = 10
     offset = (page - 1) * POSTS_PER_PAGE
 
-    current_user_id = session.get('user_id')
+    current_user_id = session.get("user_id")
     params = []
 
-    #  2. Build the Query 
+    #  2. Build the Query
     where_clause = ""
     if community:
         where_clause = "WHERE p.community_id = ?"
-        params.append(community['id'])
-    elif show == 'following':
-        where_clause = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
+        params.append(community["id"])
+    elif show == "following":
+        where_clause = (
+            "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
+        )
         params.append(current_user_id)
-    elif sort not in ('popular', 'recommended'):
+    elif sort not in ("popular", "recommended"):
         where_clause = "WHERE p.community_id IN (SELECT community_id FROM user_community WHERE user_id = ?)"
         params.append(current_user_id)
 
     if not community:
-        where_clause += (" AND " if where_clause else "WHERE ") + "c.public_id != 'wilderness'"
+        where_clause += (
+            " AND " if where_clause else "WHERE "
+        ) + "c.public_id != 'wilderness'"
 
     # Add the pagination parameters to the query arguments
     pagination_params = (POSTS_PER_PAGE, offset)
 
-    if sort == 'popular':
+    if sort == "popular":
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, c.public_id, uc.nickname,
                    IFNULL(r.total_reactions, 0) as total_reactions
@@ -149,8 +171,15 @@ def feed(community=None):
         """
         final_params = params + list(pagination_params)
         posts = query_db(query, final_params)
-    elif sort == 'recommended':
-        posts = recommend(current_user_id, show == 'following') if not community else query_db('SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id, c.public_id, uc.nickname FROM posts p JOIN users u ON u.id=p.user_id JOIN communities c ON c.id=p.community_id LEFT JOIN user_community uc ON uc.user_id=p.user_id AND uc.community_id=p.community_id WHERE p.community_id=? ORDER BY p.created_at DESC LIMIT ? OFFSET ?', (community['id'], POSTS_PER_PAGE, offset))
+    elif sort == "recommended":
+        posts = (
+            recommend(current_user_id, show == "following")
+            if not community
+            else query_db(
+                "SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id, c.public_id, uc.nickname FROM posts p JOIN users u ON u.id=p.user_id JOIN communities c ON c.id=p.community_id LEFT JOIN user_community uc ON uc.user_id=p.user_id AND uc.community_id=p.community_id WHERE p.community_id=? ORDER BY p.created_at DESC LIMIT ? OFFSET ?",
+                (community["id"], POSTS_PER_PAGE, offset),
+            )
+        )
     else:  # Default sort is 'new'
         query = f"""
             SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, c.public_id, uc.nickname
@@ -169,11 +198,11 @@ def feed(community=None):
     for post in posts:
         # Determine if the current user follows the poster
         followed_poster = False
-        if current_user_id and post['user_id'] != current_user_id:
+        if current_user_id and post["user_id"] != current_user_id:
             follow_check = query_db(
-                'SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?',
-                (current_user_id, post['user_id']),
-                one=True
+                "SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?",
+                (current_user_id, post["user_id"]),
+                one=True,
             )
             if follow_check:
                 followed_poster = True
@@ -182,360 +211,534 @@ def feed(community=None):
         user_reaction = None
         if current_user_id:
             reaction_check = query_db(
-                'SELECT reaction_type FROM reactions WHERE user_id = ? AND post_id = ?',
-                (current_user_id, post['id']),
-                one=True
+                "SELECT reaction_type FROM reactions WHERE user_id = ? AND post_id = ?",
+                (current_user_id, post["id"]),
+                one=True,
             )
             if reaction_check:
-                user_reaction = reaction_check['reaction_type']
+                user_reaction = reaction_check["reaction_type"]
 
-        reactions = query_db('SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type', (post['id'],))
-        comments_raw = query_db('SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC', (post['id'],))
+        reactions = query_db(
+            "SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type",
+            (post["id"],),
+        )
+        comments_raw = query_db(
+            "SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC",
+            (post["id"],),
+        )
         post_dict = dict(post)
-        post_dict['content'], _ = moderate_content(post_dict['content'])
+        if post_dict["public_id"] != "wilderness":
+            post_dict["content"], _ = moderate_content(post_dict["content"])
         comments_moderated = []
         for comment in comments_raw:
             comment_dict = dict(comment)
-            comment_dict['content'], _ = moderate_content(comment_dict['content'])
+            comment_dict["content"], _ = moderate_content(comment_dict["content"])
             comments_moderated.append(comment_dict)
-        posts_data.append({
-            'post': post_dict,
-            'reactions': reactions,
-            'user_reaction': user_reaction,
-            'followed_poster': followed_poster,
-            'comments': comments_moderated
-        })
+        posts_data.append(
+            {
+                "post": post_dict,
+                "reactions": reactions,
+                "user_reaction": user_reaction,
+                "followed_poster": followed_poster,
+                "comments": comments_moderated,
+            }
+        )
 
-    #  4. Render Template with Pagination Info 
-    return render_template('feed.html.j2', 
-                           posts=posts_data,
-                           communities=query_db('SELECT * FROM communities ORDER BY public_id'),
-                           community=community,
-                           membership=query_db('SELECT * FROM user_community WHERE user_id=? AND community_id=?', (current_user_id, community['id']), one=True) if community and current_user_id else None, 
-                           current_sort=sort,
-                           current_show=show,
-                           page=page, # Pass current page number
-                           per_page=POSTS_PER_PAGE, # Pass items per page
-                           reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+    #  4. Render Template with Pagination Info
+    return render_template(
+        "feed.html.j2",
+        posts=posts_data,
+        communities=query_db("SELECT * FROM communities ORDER BY public_id"),
+        community=community,
+        membership=(
+            query_db(
+                "SELECT * FROM user_community WHERE user_id=? AND community_id=?",
+                (current_user_id, community["id"]),
+                one=True,
+            )
+            if community and current_user_id
+            else None
+        ),
+        current_sort=sort,
+        current_show=show,
+        page=page,  # Pass current page number
+        per_page=POSTS_PER_PAGE,  # Pass items per page
+        reaction_emojis=REACTION_EMOJIS,
+        reaction_types=REACTION_TYPES,
+    )
 
 
-@app.route('/c')
+@app.route("/c")
 def community_list():
-    return render_template('communities.html.j2', communities=query_db('SELECT c.id, c.public_id, c.description, COUNT(uc.user_id) AS member_count FROM communities c LEFT JOIN user_community uc ON uc.community_id = c.id GROUP BY c.id, c.public_id ORDER BY c.public_id'))
+    return render_template(
+        "communities.html.j2",
+        communities=query_db(
+            "SELECT c.id, c.public_id, c.description, COUNT(uc.user_id) AS member_count FROM communities c LEFT JOIN user_community uc ON uc.community_id = c.id GROUP BY c.id, c.public_id ORDER BY c.public_id"
+        ),
+    )
 
-@app.route('/c/create', methods=['POST'])
+
+@app.route("/c/wilderness/warning")
+def wilderness_warning():
+    return render_template("wilderness_warning.html.j2")
+
+
+@app.route("/c/create", methods=["POST"])
 def create_community():
-    if session.get('username') != 'admin':
+    if session.get("username") != "admin":
         abort(403)
-    public_id = request.form.get('public_id', '')
-    if not re.fullmatch(r'[a-z]{3,33}', public_id):
-        flash('Community ID must contain 3?33 lowercase letters.', 'warning')
+    public_id = request.form.get("public_id", "")
+    if not re.fullmatch(r"[a-z]{3,33}", public_id):
+        flash("Community ID must contain 3?33 lowercase letters.", "warning")
     else:
         try:
-            get_db().execute('INSERT INTO communities(public_id) VALUES (?)', (public_id,))
+            get_db().execute(
+                "INSERT INTO communities(public_id) VALUES (?)", (public_id,)
+            )
             get_db().commit()
-            flash('Community created.', 'success')
+            flash("Community created.", "success")
         except sqlite3.IntegrityError:
             get_db().rollback()
-            flash('Community already exists.', 'warning')
-    return redirect(url_for('community_list'))
+            flash("Community already exists.", "warning")
+    return redirect(url_for("community_list"))
 
-@app.route('/c/<public_id>')
+
+@app.route("/c/<public_id>")
 def community_page(public_id):
-    community = query_db('SELECT * FROM communities WHERE public_id=?', (public_id,), one=True)
+    community = query_db(
+        "SELECT * FROM communities WHERE public_id=?", (public_id,), one=True
+    )
     if not community:
         abort(404)
     return feed(community)
 
-@app.route('/c/<public_id>/<action>', methods=['POST'])
+
+@app.route("/c/<public_id>/<action>", methods=["POST"])
 def community_action(public_id, action):
-    user_id = session.get('user_id')
+    user_id = session.get("user_id")
     if not user_id:
-        return redirect(url_for('login'))
-    community = query_db('SELECT id FROM communities WHERE public_id=?', (public_id,), one=True)
+        return redirect(url_for("login"))
+    community = query_db(
+        "SELECT id FROM communities WHERE public_id=?", (public_id,), one=True
+    )
     if not community:
         abort(404)
-    if public_id == 'wilderness' and action in ('join', 'nickname'):
+    if public_id == "wilderness" and action in ("join", "nickname"):
         abort(403)
     db = get_db()
-    if action == 'description':
-        if session.get('username') != 'admin':
+    if action == "description":
+        if session.get("username") != "admin":
             abort(403)
-        description = request.form.get('description', '').strip()
+        description = request.form.get("description", "").strip()
         if len(description) > 1000:
-            flash('Description must be at most 1000 characters.', 'warning')
+            flash("Description must be at most 1000 characters.", "warning")
         else:
-            db.execute('UPDATE communities SET description=? WHERE id=?', (description, community['id']))
-    elif action == 'join':
-        db.execute('INSERT OR IGNORE INTO user_community(user_id, community_id) VALUES (?, ?)', (user_id, community['id']))
-    elif action == 'leave':
-        db.execute('DELETE FROM user_community WHERE user_id=? AND community_id=?', (user_id, community['id']))
-    elif action == 'nickname':
-        nickname = request.form.get('nickname', '').strip()
+            db.execute(
+                "UPDATE communities SET description=? WHERE id=?",
+                (description, community["id"]),
+            )
+    elif action == "join":
+        db.execute(
+            "INSERT OR IGNORE INTO user_community(user_id, community_id) VALUES (?, ?)",
+            (user_id, community["id"]),
+        )
+    elif action == "leave":
+        db.execute(
+            "DELETE FROM user_community WHERE user_id=? AND community_id=?",
+            (user_id, community["id"]),
+        )
+    elif action == "nickname":
+        nickname = request.form.get("nickname", "").strip()
         if len(nickname) > 50:
-            flash('Nickname must be at most 50 characters.', 'warning')
+            flash("Nickname must be at most 50 characters.", "warning")
         else:
-            cursor = db.execute('UPDATE user_community SET nickname=? WHERE user_id=? AND community_id=?', (nickname or None, user_id, community['id']))
+            cursor = db.execute(
+                "UPDATE user_community SET nickname=? WHERE user_id=? AND community_id=?",
+                (nickname or None, user_id, community["id"]),
+            )
             if not cursor.rowcount:
                 abort(403)
     else:
         abort(404)
-    if action == 'join':
+    if action == "join":
         award_clan_tags(db)
-    elif action == 'leave':
-        db.execute('UPDATE users SET clan_tag_id=NULL WHERE id=? AND clan_tag_id=? AND username != ?', (user_id, community['id'], 'admin'))
+    elif action == "leave":
+        db.execute(
+            "UPDATE users SET clan_tag_id=NULL WHERE id=? AND clan_tag_id=? AND username != ?",
+            (user_id, community["id"], "admin"),
+        )
     db.commit()
-    return redirect(url_for('community_page', public_id=public_id))
+    return redirect(url_for("community_page", public_id=public_id))
 
-@app.route('/posts/new', methods=['POST'])
+
+@app.route("/posts/new", methods=["POST"])
 def add_post():
     """Handles creating a new post from the feed."""
-    user_id = session.get('user_id')
+    user_id = session.get("user_id")
 
     # Block access if user is not logged in
     if not user_id:
-        flash('You must be logged in to create a post.', 'danger')
-        return redirect(url_for('login'))
+        flash("You must be logged in to create a post.", "danger")
+        return redirect(url_for("login"))
+
+    session.pop("pending_post_nonce", None)
 
     # Get content from the submitted form
-    content = request.form.get('content')
+    content = request.form.get("content")
 
-    community = query_db('SELECT id FROM communities WHERE public_id = ?', (request.form.get('community_id', ''),), one=True)
+    community = query_db(
+        "SELECT id FROM communities WHERE public_id = ?",
+        (request.form.get("community_id", ""),),
+        one=True,
+    )
     if not community:
-        flash('Select a valid community.', 'warning')
-        return redirect(url_for('feed'))
+        flash("Select a valid community.", "warning")
+        return redirect(url_for("feed"))
 
-    # Pass the user's content through the moderation function
-    moderated_content = content
+    # Use the same moderation decision here as when displaying community posts.
+    # Scores of 5.0 or higher require confirmation before being sent to Wilderness.
+    _, moderation_score = moderate_content(content)
+    if content and content.strip() and moderation_score >= 5.0:
+        if not query_db("SELECT id FROM communities WHERE public_id = 'wilderness'", one=True):
+            flash("Wilderness is unavailable; your post was not created.", "warning")
+            return render_template("post_warning.html.j2", content=content, community_id=request.form.get("community_id"), unavailable=True)
+        nonce = secrets.token_urlsafe(32)
+        session["pending_post_nonce"] = nonce
+        token = URLSafeTimedSerializer(app.secret_key, salt="post-confirmation").dumps({"content": content, "community_id": request.form.get("community_id"), "nonce": nonce, "user_id": user_id})
+        return render_template("post_warning.html.j2", content=content, community_id=request.form.get("community_id"), segments=highlight_segments(content), confirmation=token)
 
     # Basic validation to ensure post is not empty
-    if moderated_content and moderated_content.strip():
+    if content and content.strip():
         db = get_db()
-        db.execute('INSERT INTO posts (user_id, content, community_id) VALUES (?, ?, ?)',
-                   (user_id, moderated_content, community['id']))
+        db.execute(
+            "INSERT INTO posts (user_id, content, community_id) VALUES (?, ?, ?)",
+            (user_id, content, community["id"]),
+        )
         db.commit()
-        flash('Your post was successfully created!', 'success')
+        flash("Your post was successfully created!", "success")
     else:
         # This will catch empty posts or posts that were fully censored
-        flash('Post cannot be empty or was fully censored.', 'warning')
+        flash("Post cannot be empty or was fully censored.", "warning")
 
     # Redirect back to the main feed to see the new post
-    return redirect(url_for('feed'))
-    
-    
-@app.route('/posts/<int:post_id>/delete', methods=['POST'])
+    return redirect(url_for("feed"))
+
+
+@app.route("/posts/edit", methods=["POST"])
+def edit_post_draft():
+    if not session.get("user_id"):
+        return redirect(url_for("login"))
+    session.pop("pending_post_nonce", None)
+    return render_template("post_edit.html.j2", content=request.form.get("content", ""), community_id=request.form.get("community_id", ""))
+
+
+@app.route("/posts/confirm", methods=["POST"])
+def confirm_post():
+    if not session.get("user_id"):
+        return redirect(url_for("login"))
+    try:
+        pending = URLSafeTimedSerializer(app.secret_key, salt="post-confirmation").loads(request.form.get("confirmation", ""), max_age=3600)
+    except BadSignature:
+        abort(400)
+    nonce = session.get("pending_post_nonce", "")
+    if not nonce or pending.get("user_id") != session["user_id"] or not secrets.compare_digest(nonce, pending.get("nonce", "")):
+        abort(400)
+    wilderness = query_db("SELECT id FROM communities WHERE public_id = 'wilderness'", one=True)
+    if not wilderness:
+        flash("Wilderness is unavailable; your post was not created.", "warning")
+        return render_template("post_warning.html.j2", content=pending["content"], community_id=pending["community_id"], unavailable=True)
+    db = get_db()
+    db.execute("INSERT INTO posts (user_id, content, community_id) VALUES (?, ?, ?)", (session["user_id"], pending["content"], wilderness["id"]))
+    db.commit()
+    session.pop("pending_post_nonce", None)
+    flash("Your post was created in /c/wilderness.", "success")
+    return redirect(url_for("community_page", public_id="wilderness"))
+
+
+@app.route("/posts/<int:post_id>/delete", methods=["POST"])
 def delete_post(post_id):
     """Handles deleting a post."""
-    user_id = session.get('user_id')
+    user_id = session.get("user_id")
 
     # Block access if user is not logged in
     if not user_id:
-        flash('You must be logged in to delete a post.', 'danger')
-        return redirect(url_for('login'))
+        flash("You must be logged in to delete a post.", "danger")
+        return redirect(url_for("login"))
 
     # Find the post in the database
-    post = query_db('SELECT id, user_id FROM posts WHERE id = ?', (post_id,), one=True)
+    post = query_db("SELECT id, user_id FROM posts WHERE id = ?", (post_id,), one=True)
 
     # Check if the post exists and if the current user is the owner
     if not post:
-        flash('Post not found.', 'danger')
-        return redirect(url_for('feed'))
+        flash("Post not found.", "danger")
+        return redirect(url_for("feed"))
 
-    if post['user_id'] != user_id:
+    if post["user_id"] != user_id:
         # Security check: prevent users from deleting others' posts
-        flash('You do not have permission to delete this post.', 'danger')
-        return redirect(url_for('feed'))
+        flash("You do not have permission to delete this post.", "danger")
+        return redirect(url_for("feed"))
 
     # If all checks pass, proceed with deletion
     db = get_db()
     # To maintain database integrity, delete associated records first
-    db.execute('DELETE FROM comments WHERE post_id = ?', (post_id,))
-    db.execute('DELETE FROM reactions WHERE post_id = ?', (post_id,))
+    db.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
+    db.execute("DELETE FROM reactions WHERE post_id = ?", (post_id,))
     # Finally, delete the post itself
-    db.execute('DELETE FROM posts WHERE id = ?', (post_id,))
+    db.execute("DELETE FROM posts WHERE id = ?", (post_id,))
     db.commit()
 
-    flash('Your post was successfully deleted.', 'success')
+    flash("Your post was successfully deleted.", "success")
     # Redirect back to the page the user came from, or the feed as a fallback
-    return redirect(request.referrer or url_for('feed'))
+    return redirect(request.referrer or url_for("feed"))
+
 
 @app.context_processor
 def clan_tag_context():
-    rows = query_db("SELECT u.username, c.public_id FROM users u JOIN communities c ON c.id=u.clan_tag_id") or []
-    return {'clan_tags': {row['username']: row['public_id'] for row in rows}}
+    rows = (
+        query_db(
+            "SELECT u.username, c.public_id FROM users u JOIN communities c ON c.id=u.clan_tag_id"
+        )
+        or []
+    )
+    return {"clan_tags": {row["username"]: row["public_id"] for row in rows}}
 
-@app.route('/u/<username>/clan-tag', methods=['POST'])
+
+@app.route("/u/<username>/clan-tag", methods=["POST"])
 def select_clan_tag(username):
-    user = query_db('SELECT id, username FROM users WHERE username=?', (username,), one=True)
+    user = query_db(
+        "SELECT id, username FROM users WHERE username=?", (username,), one=True
+    )
     if not user:
         abort(404)
-    if session.get('user_id') != user['id']:
+    if session.get("user_id") != user["id"]:
         abort(403)
-    public_id = request.form.get('community', '')
+    public_id = request.form.get("community", "")
     community = None
     if public_id:
-        community = query_db('SELECT id FROM communities WHERE public_id=?', (public_id,), one=True)
+        community = query_db(
+            "SELECT id FROM communities WHERE public_id=?", (public_id,), one=True
+        )
         if not community:
             abort(403)
-        if user['username'] != 'admin' and not query_db('SELECT 1 FROM earned_clan_tags e JOIN user_community m ON m.user_id=e.user_id AND m.community_id=e.community_id WHERE e.user_id=? AND e.community_id=?', (user['id'], community['id']), one=True):
+        if user["username"] != "admin" and not query_db(
+            "SELECT 1 FROM earned_clan_tags e JOIN user_community m ON m.user_id=e.user_id AND m.community_id=e.community_id WHERE e.user_id=? AND e.community_id=?",
+            (user["id"], community["id"]),
+            one=True,
+        ):
             abort(403)
     db = get_db()
-    db.execute('UPDATE users SET clan_tag_id=? WHERE id=?', (community['id'] if community else None, user['id']))
+    db.execute(
+        "UPDATE users SET clan_tag_id=? WHERE id=?",
+        (community["id"] if community else None, user["id"]),
+    )
     db.commit()
-    return redirect(url_for('user_profile', username=username))
+    return redirect(url_for("user_profile", username=username))
 
-@app.route('/u/<username>')
+
+@app.route("/u/<username>")
 def user_profile(username):
     """Displays a user's profile page with moderated bio, posts, and latest comments."""
-    
-    user_raw = query_db('SELECT * FROM users WHERE username = ?', (username,), one=True)
+
+    user_raw = query_db("SELECT * FROM users WHERE username = ?", (username,), one=True)
     if not user_raw:
         abort(404)
 
     user = dict(user_raw)
-    moderated_bio, _ = moderate_content(user.get('profile', ''))
-    user['profile'] = moderated_bio
+    moderated_bio, _ = moderate_content(user.get("profile", ""))
+    user["profile"] = moderated_bio
 
-    posts_raw = query_db('SELECT p.id, p.content, p.user_id, p.created_at, c.public_id, uc.nickname FROM posts p JOIN communities c ON c.id=p.community_id LEFT JOIN user_community uc ON uc.community_id=p.community_id AND uc.user_id=p.user_id WHERE p.user_id = ? ORDER BY p.created_at DESC', (user['id'],))
+    posts_raw = query_db(
+        "SELECT p.id, p.content, p.user_id, p.created_at, c.public_id, uc.nickname FROM posts p JOIN communities c ON c.id=p.community_id LEFT JOIN user_community uc ON uc.community_id=p.community_id AND uc.user_id=p.user_id WHERE p.user_id = ? ORDER BY p.created_at DESC",
+        (user["id"],),
+    )
     posts = []
     for post_raw in posts_raw:
         post = dict(post_raw)
-        moderated_post_content, _ = moderate_content(post['content'])
-        post['content'] = moderated_post_content
+        moderated_post_content, _ = moderate_content(post["content"])
+        post["content"] = moderated_post_content
         posts.append(post)
 
-    comments_raw = query_db('SELECT id, content, user_id, post_id, created_at FROM comments WHERE user_id = ? ORDER BY created_at DESC LIMIT 100', (user['id'],))
+    comments_raw = query_db(
+        "SELECT id, content, user_id, post_id, created_at FROM comments WHERE user_id = ? ORDER BY created_at DESC LIMIT 100",
+        (user["id"],),
+    )
     comments = []
     for comment_raw in comments_raw:
         comment = dict(comment_raw)
-        moderated_comment_content, _ = moderate_content(comment['content'])
-        comment['content'] = moderated_comment_content
+        moderated_comment_content, _ = moderate_content(comment["content"])
+        comment["content"] = moderated_comment_content
         comments.append(comment)
 
-    followers_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE followed_id = ?', (user['id'],), one=True)['cnt']
-    following_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?', (user['id'],), one=True)['cnt']
+    followers_count = query_db(
+        "SELECT COUNT(*) as cnt FROM follows WHERE followed_id = ?",
+        (user["id"],),
+        one=True,
+    )["cnt"]
+    following_count = query_db(
+        "SELECT COUNT(*) as cnt FROM follows WHERE follower_id = ?",
+        (user["id"],),
+        one=True,
+    )["cnt"]
 
-    #  NEW: CHECK FOLLOW STATUS 
-    is_currently_following = False # Default to False
-    current_user_id = session.get('user_id')
-    
+    #  NEW: CHECK FOLLOW STATUS
+    is_currently_following = False  # Default to False
+    current_user_id = session.get("user_id")
+
     # We only need to check if a user is logged in
     if current_user_id:
         follow_relation = query_db(
-            'SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?',
-            (current_user_id, user['id']),
-            one=True
+            "SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?",
+            (current_user_id, user["id"]),
+            one=True,
         )
         if follow_relation:
             is_currently_following = True
     # --
 
-    return render_template('user_profile.html.j2', 
-                           user=user,
-                           available_tags=(query_db('SELECT id, public_id FROM communities ORDER BY public_id') if user['username'] == 'admin' else query_db('SELECT c.id, c.public_id FROM earned_clan_tags e JOIN communities c ON c.id=e.community_id JOIN user_community m ON m.user_id=e.user_id AND m.community_id=e.community_id WHERE e.user_id=? ORDER BY c.public_id', (user['id'],))) if session.get('user_id') == user['id'] else [],
-                           posts=posts, 
-                           comments=comments,
-                           followers_count=followers_count, 
-                           following_count=following_count,
-                           is_following=is_currently_following)
-    
+    return render_template(
+        "user_profile.html.j2",
+        user=user,
+        available_tags=(
+            (
+                query_db("SELECT id, public_id FROM communities ORDER BY public_id")
+                if user["username"] == "admin"
+                else query_db(
+                    "SELECT c.id, c.public_id FROM earned_clan_tags e JOIN communities c ON c.id=e.community_id JOIN user_community m ON m.user_id=e.user_id AND m.community_id=e.community_id WHERE e.user_id=? ORDER BY c.public_id",
+                    (user["id"],),
+                )
+            )
+            if session.get("user_id") == user["id"]
+            else []
+        ),
+        posts=posts,
+        comments=comments,
+        followers_count=followers_count,
+        following_count=following_count,
+        is_following=is_currently_following,
+    )
 
-@app.route('/u/<username>/followers')
+
+@app.route("/u/<username>/followers")
 def user_followers(username):
-    user = query_db('SELECT * FROM users WHERE username = ?', (username,), one=True)
+    user = query_db("SELECT * FROM users WHERE username = ?", (username,), one=True)
     if not user:
         abort(404)
-    followers = query_db('''
+    followers = query_db(
+        """
         SELECT u.username
         FROM follows f
         JOIN users u ON f.follower_id = u.id
         WHERE f.followed_id = ?
-    ''', (user['id'],))
-    return render_template('user_list.html.j2', user=user, users=followers, title="Followers of")
+    """,
+        (user["id"],),
+    )
+    return render_template(
+        "user_list.html.j2", user=user, users=followers, title="Followers of"
+    )
 
-@app.route('/u/<username>/following')
+
+@app.route("/u/<username>/following")
 def user_following(username):
-    user = query_db('SELECT * FROM users WHERE username = ?', (username,), one=True)
+    user = query_db("SELECT * FROM users WHERE username = ?", (username,), one=True)
     if not user:
         abort(404)
-    following = query_db('''
+    following = query_db(
+        """
         SELECT u.username
         FROM follows f
         JOIN users u ON f.followed_id = u.id
         WHERE f.follower_id = ?
-    ''', (user['id'],))
-    return render_template('user_list.html.j2', user=user, users=following, title="Users followed by")
+    """,
+        (user["id"],),
+    )
+    return render_template(
+        "user_list.html.j2", user=user, users=following, title="Users followed by"
+    )
 
-@app.route('/posts/<int:post_id>')
+
+@app.route("/posts/<int:post_id>")
 def post_detail(post_id):
     """Displays a single post and its comments, with content moderation applied."""
-    
-    post_raw = query_db('''
+
+    post_raw = query_db(
+        """
         SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, c.public_id, uc.nickname
         FROM posts p
         JOIN users u ON p.user_id = u.id
             JOIN communities c ON c.id = p.community_id
             LEFT JOIN user_community uc ON uc.community_id = p.community_id AND uc.user_id = p.user_id
         WHERE p.id = ?
-    ''', (post_id,), one=True)
+    """,
+        (post_id,),
+        one=True,
+    )
 
     if not post_raw:
         # The abort function will stop the request and show a 404 Not Found page.
         abort(404)
 
-    #  Moderation for the Main Post 
+    #  Moderation for the Main Post
     # Convert the raw database row to a mutable dictionary
     post = dict(post_raw)
     # Unpack the tuple from moderate_content, we only need the moderated content string here
-    moderated_post_content, _ = moderate_content(post['content'])
-    post['content'] = moderated_post_content
+    if post["public_id"] != "wilderness":
+        post["content"], _ = moderate_content(post["content"])
 
-    #  Fetch Reactions (No moderation needed) 
-    reactions = query_db('''
+    #  Fetch Reactions (No moderation needed)
+    reactions = query_db(
+        """
         SELECT reaction_type, COUNT(*) as count
         FROM reactions
         WHERE post_id = ?
         GROUP BY reaction_type
-    ''', (post_id,))
+    """,
+        (post_id,),
+    )
 
-    #  Fetch and Moderate Comments 
-    comments_raw = query_db('SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC', (post_id,))
-    
-    comments = [] # Create a new list for the moderated comments
+    #  Fetch and Moderate Comments
+    comments_raw = query_db(
+        "SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC",
+        (post_id,),
+    )
+
+    comments = []  # Create a new list for the moderated comments
     for comment_raw in comments_raw:
-        comment = dict(comment_raw) # Convert to a dictionary
+        comment = dict(comment_raw)  # Convert to a dictionary
         # Moderate the content of each comment
-        print(comment['content'])
-        moderated_comment_content, _ = moderate_content(comment['content'])
-        comment['content'] = moderated_comment_content
+        print(comment["content"])
+        moderated_comment_content, _ = moderate_content(comment["content"])
+        comment["content"] = moderated_comment_content
         comments.append(comment)
 
     # Pass the moderated data to the template
-    return render_template('post_detail.html.j2',
-                           post=post,
-                           reactions=reactions,
-                           comments=comments,
-                           reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+    return render_template(
+        "post_detail.html.j2",
+        post=post,
+        reactions=reactions,
+        comments=comments,
+        reaction_emojis=REACTION_EMOJIS,
+        reaction_types=REACTION_TYPES,
+    )
 
-@app.route('/about')
+
+@app.route("/about")
 def about():
-    return render_template('about.html.j2')
+    return render_template("about.html.j2")
 
-@app.route('/privacy')
+
+@app.route("/privacy")
 def privacy():
-    return render_template('privacy.html.j2')
+    return render_template("privacy.html.j2")
 
 
-@app.route('/signup', methods=['GET', 'POST'])
+@app.route("/signup", methods=["GET", "POST"])
 def signup():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        location = request.form.get('location', '')
-        birthdate = request.form.get('birthdate', '')
-        profile = request.form.get('profile', '')
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+        location = request.form.get("location", "")
+        birthdate = request.form.get("birthdate", "")
+        profile = request.form.get("profile", "")
 
         hashed_password = generate_password_hash(password)
 
@@ -543,268 +746,303 @@ def signup():
         cur = db.cursor()
         try:
             cur.execute(
-                'INSERT INTO users (username, password, location, birthdate, profile) VALUES (?, ?, ?, ?, ?)',
-                (username, hashed_password, location, birthdate, profile)
+                "INSERT INTO users (username, password, location, birthdate, profile) VALUES (?, ?, ?, ?, ?)",
+                (username, hashed_password, location, birthdate, profile),
             )
             # Create the account and its default membership atomically.
             new_user_id = cur.lastrowid
-            cur.execute("INSERT INTO user_community (user_id, community_id) SELECT ?, id FROM communities WHERE public_id = 'general'", (new_user_id,))
+            cur.execute(
+                "INSERT INTO user_community (user_id, community_id) SELECT ?, id FROM communities WHERE public_id = 'general'",
+                (new_user_id,),
+            )
             if cur.rowcount != 1:
-                raise RuntimeError('General community is missing; run the communities migration.')
+                raise RuntimeError(
+                    "General community is missing; run the communities migration."
+                )
             db.commit()
 
             # 2. Add user info to the session cookie.
-            session.clear() # Clear any old session data
-            session['user_id'] = new_user_id
-            session['username'] = username
+            session.clear()  # Clear any old session data
+            session["user_id"] = new_user_id
+            session["username"] = username
 
             # 3. Flash a welcome message and redirect to the feed.
-            flash(f'Welcome, {username}! Your account has been created.', 'success')
-            return redirect(url_for('feed')) # Redirect to the main feed/dashboard
+            flash(f"Welcome, {username}! Your account has been created.", "success")
+            return redirect(url_for("feed"))  # Redirect to the main feed/dashboard
 
         except sqlite3.IntegrityError:
             db.rollback()
-            flash('Username already taken. Please choose another one.', 'danger')
+            flash("Username already taken. Please choose another one.", "danger")
         finally:
             cur.close()
-            
-    return render_template('signup.html.j2')
 
-@app.route('/login', methods=['GET', 'POST'])
+    return render_template("signup.html.j2")
+
+
+@app.route("/login", methods=["GET", "POST"])
 def login():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
 
         db = get_db()
-        user = db.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+        user = db.execute(
+            "SELECT * FROM users WHERE username = ?", (username,)
+        ).fetchone()
         db.close()
 
         # 1. Check if the user exists.
         # 2. If user exists, use check_password_hash to securely compare the password.
         #    This function handles the salt and prevents timing attacks.
-        if user and check_password_hash(user['password'], password):
+        if user and check_password_hash(user["password"], password):
             # Password is correct!
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            flash('Logged in successfully.', 'success')
-            return redirect(url_for('feed'))
+            session["user_id"] = user["id"]
+            session["username"] = user["username"]
+            flash("Logged in successfully.", "success")
+            return redirect(url_for("feed"))
         else:
             # User does not exist or password was incorrect.
-            flash('Invalid username or password.', 'danger')
-            
-    return render_template('login.html.j2')
+            flash("Invalid username or password.", "danger")
 
-@app.route('/logout')
+    return render_template("login.html.j2")
+
+
+@app.route("/logout")
 def logout():
     session.clear()
-    flash('Logged out.', 'info')
-    return redirect(url_for('login'))
+    flash("Logged out.", "info")
+    return redirect(url_for("login"))
 
-@app.route('/posts/<int:post_id>/comment', methods=['POST'])
+
+@app.route("/posts/<int:post_id>/comment", methods=["POST"])
 def add_comment(post_id):
     """Handles adding a new comment to a specific post."""
-    user_id = session.get('user_id')
+    user_id = session.get("user_id")
 
     # Block access if user is not logged in
     if not user_id:
-        flash('You must be logged in to comment.', 'danger')
-        return redirect(url_for('login'))
+        flash("You must be logged in to comment.", "danger")
+        return redirect(url_for("login"))
 
     # Get content from the submitted form
-    content = request.form.get('content')
+    content = request.form.get("content")
 
     # Basic validation to ensure comment is not empty
     if content and content.strip():
         db = get_db()
-        db.execute('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)',
-                   (post_id, user_id, content))
+        db.execute(
+            "INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)",
+            (post_id, user_id, content),
+        )
         award_clan_tags(db)
         db.commit()
-        flash('Your comment was added.', 'success')
+        flash("Your comment was added.", "success")
     else:
-        flash('Comment cannot be empty.', 'warning')
+        flash("Comment cannot be empty.", "warning")
 
     # Redirect back to the page the user came from (likely the post detail page)
-    return redirect(request.referrer or url_for('post_detail', post_id=post_id))
+    return redirect(request.referrer or url_for("post_detail", post_id=post_id))
 
-@app.route('/comments/<int:comment_id>/delete', methods=['POST'])
+
+@app.route("/comments/<int:comment_id>/delete", methods=["POST"])
 def delete_comment(comment_id):
     """Handles deleting a comment."""
-    user_id = session.get('user_id')
+    user_id = session.get("user_id")
 
     # Block access if user is not logged in
     if not user_id:
-        flash('You must be logged in to delete a comment.', 'danger')
-        return redirect(url_for('login'))
+        flash("You must be logged in to delete a comment.", "danger")
+        return redirect(url_for("login"))
 
     # Find the comment and the original post's author ID
-    comment = query_db('''
+    comment = query_db(
+        """
         SELECT c.id, c.user_id, p.user_id as post_author_id
         FROM comments c
         JOIN posts p ON c.post_id = p.id
         WHERE c.id = ?
-    ''', (comment_id,), one=True)
+    """,
+        (comment_id,),
+        one=True,
+    )
 
     # Check if the comment exists
     if not comment:
-        flash('Comment not found.', 'danger')
-        return redirect(request.referrer or url_for('feed'))
+        flash("Comment not found.", "danger")
+        return redirect(request.referrer or url_for("feed"))
 
     # Security Check: Allow deletion if the user is the comment's author OR the post's author
-    if user_id != comment['user_id'] and user_id != comment['post_author_id']:
-        flash('You do not have permission to delete this comment.', 'danger')
-        return redirect(request.referrer or url_for('feed'))
+    if user_id != comment["user_id"] and user_id != comment["post_author_id"]:
+        flash("You do not have permission to delete this comment.", "danger")
+        return redirect(request.referrer or url_for("feed"))
 
     # If all checks pass, proceed with deletion
     db = get_db()
-    db.execute('DELETE FROM comments WHERE id = ?', (comment_id,))
+    db.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
     db.commit()
 
-    flash('Comment successfully deleted.', 'success')
+    flash("Comment successfully deleted.", "success")
     # Redirect back to the page the user came from
-    return redirect(request.referrer or url_for('feed'))
+    return redirect(request.referrer or url_for("feed"))
 
-@app.route('/react', methods=['POST'])
+
+@app.route("/react", methods=["POST"])
 def add_reaction():
     """Handles adding a new reaction or updating an existing one."""
-    user_id = session.get('user_id')
+    user_id = session.get("user_id")
 
     if not user_id:
         flash("You must be logged in to react.", "danger")
-        return redirect(url_for('login'))
+        return redirect(url_for("login"))
 
-    post_id = request.form.get('post_id')
-    new_reaction_type = request.form.get('reaction')
+    post_id = request.form.get("post_id")
+    new_reaction_type = request.form.get("reaction")
 
     if not post_id or not new_reaction_type:
         flash("Invalid reaction request.", "warning")
-        return redirect(request.referrer or url_for('feed'))
+        return redirect(request.referrer or url_for("feed"))
 
     db = get_db()
 
     # Step 1: Check if a reaction from this user already exists on this post.
-    existing_reaction = query_db('SELECT id FROM reactions WHERE post_id = ? AND user_id = ?',
-                                 (post_id, user_id), one=True)
+    existing_reaction = query_db(
+        "SELECT id FROM reactions WHERE post_id = ? AND user_id = ?",
+        (post_id, user_id),
+        one=True,
+    )
 
     if existing_reaction:
         # Step 2: If it exists, UPDATE the reaction_type.
-        db.execute('UPDATE reactions SET reaction_type = ? WHERE id = ?',
-                   (new_reaction_type, existing_reaction['id']))
+        db.execute(
+            "UPDATE reactions SET reaction_type = ? WHERE id = ?",
+            (new_reaction_type, existing_reaction["id"]),
+        )
     else:
         # Step 3: If it does not exist, INSERT a new reaction.
-        db.execute('INSERT INTO reactions (post_id, user_id, reaction_type) VALUES (?, ?, ?)',
-                   (post_id, user_id, new_reaction_type))
+        db.execute(
+            "INSERT INTO reactions (post_id, user_id, reaction_type) VALUES (?, ?, ?)",
+            (post_id, user_id, new_reaction_type),
+        )
 
     award_clan_tags(db)
     db.commit()
 
-    return redirect(request.referrer or url_for('feed'))
+    return redirect(request.referrer or url_for("feed"))
 
-@app.route('/unreact', methods=['POST'])
+
+@app.route("/unreact", methods=["POST"])
 def unreact():
     """Handles removing a user's reaction from a post."""
-    user_id = session.get('user_id')
+    user_id = session.get("user_id")
 
     if not user_id:
         flash("You must be logged in to unreact.", "danger")
-        return redirect(url_for('login'))
+        return redirect(url_for("login"))
 
-    post_id = request.form.get('post_id')
+    post_id = request.form.get("post_id")
 
     if not post_id:
         flash("Invalid unreact request.", "warning")
-        return redirect(request.referrer or url_for('feed'))
+        return redirect(request.referrer or url_for("feed"))
 
     db = get_db()
 
     # Remove the reaction if it exists
     existing_reaction = query_db(
-        'SELECT id FROM reactions WHERE post_id = ? AND user_id = ?',
+        "SELECT id FROM reactions WHERE post_id = ? AND user_id = ?",
         (post_id, user_id),
-        one=True
+        one=True,
     )
 
     if existing_reaction:
-        db.execute('DELETE FROM reactions WHERE id = ?', (existing_reaction['id'],))
+        db.execute("DELETE FROM reactions WHERE id = ?", (existing_reaction["id"],))
         db.commit()
         flash("Reaction removed.", "success")
     else:
         flash("No reaction to remove.", "info")
 
-    return redirect(request.referrer or url_for('feed'))
+    return redirect(request.referrer or url_for("feed"))
 
 
-@app.route('/u/<int:user_id>/follow', methods=['POST'])
+@app.route("/u/<int:user_id>/follow", methods=["POST"])
 def follow_user(user_id):
     """Handles the logic for the current user to follow another user."""
-    follower_id = session.get('user_id')
+    follower_id = session.get("user_id")
 
     # Security: Ensure user is logged in
     if not follower_id:
         flash("You must be logged in to follow users.", "danger")
-        return redirect(url_for('login'))
+        return redirect(url_for("login"))
 
     # Security: Prevent users from following themselves
     if follower_id == user_id:
         flash("You cannot follow yourself.", "warning")
-        return redirect(request.referrer or url_for('feed'))
+        return redirect(request.referrer or url_for("feed"))
 
     # Check if the user to be followed actually exists
-    user_to_follow = query_db('SELECT id FROM users WHERE id = ?', (user_id,), one=True)
+    user_to_follow = query_db("SELECT id FROM users WHERE id = ?", (user_id,), one=True)
     if not user_to_follow:
         flash("The user you are trying to follow does not exist.", "danger")
-        return redirect(request.referrer or url_for('feed'))
-        
+        return redirect(request.referrer or url_for("feed"))
+
     db = get_db()
     try:
         # Insert the follow relationship. The PRIMARY KEY constraint will prevent duplicates if you've set one.
-        db.execute('INSERT INTO follows (follower_id, followed_id) VALUES (?, ?)',
-                   (follower_id, user_id))
+        db.execute(
+            "INSERT INTO follows (follower_id, followed_id) VALUES (?, ?)",
+            (follower_id, user_id),
+        )
         db.commit()
-        username_to_follow = query_db('SELECT username FROM users WHERE id = ?', (user_id,), one=True)['username']
+        username_to_follow = query_db(
+            "SELECT username FROM users WHERE id = ?", (user_id,), one=True
+        )["username"]
         flash(f"You are now following {username_to_follow}.", "success")
     except sqlite3.IntegrityError:
         flash("You are already following this user.", "info")
 
-    return redirect(request.referrer or url_for('feed'))
+    return redirect(request.referrer or url_for("feed"))
 
 
-@app.route('/u/<int:user_id>/unfollow', methods=['POST'])
+@app.route("/u/<int:user_id>/unfollow", methods=["POST"])
 def unfollow_user(user_id):
     """Handles the logic for the current user to unfollow another user."""
-    follower_id = session.get('user_id')
+    follower_id = session.get("user_id")
 
     # Security: Ensure user is logged in
     if not follower_id:
         flash("You must be logged in to unfollow users.", "danger")
-        return redirect(url_for('login'))
+        return redirect(url_for("login"))
 
     db = get_db()
-    cur = db.execute('DELETE FROM follows WHERE follower_id = ? AND followed_id = ?',
-               (follower_id, user_id))
+    cur = db.execute(
+        "DELETE FROM follows WHERE follower_id = ? AND followed_id = ?",
+        (follower_id, user_id),
+    )
     db.commit()
 
     if cur.rowcount > 0:
         # cur.rowcount tells us if a row was actually deleted
-        username_unfollowed = query_db('SELECT username FROM users WHERE id = ?', (user_id,), one=True)['username']
+        username_unfollowed = query_db(
+            "SELECT username FROM users WHERE id = ?", (user_id,), one=True
+        )["username"]
         flash(f"You have unfollowed {username_unfollowed}.", "success")
     else:
         # This case handles if someone tries to unfollow a user they weren't following
         flash("You were not following this user.", "info")
 
     # Redirect back to the page the user came from
-    return redirect(request.referrer or url_for('feed'))
+    return redirect(request.referrer or url_for("feed"))
 
-@app.route('/admin')
+
+@app.route("/admin")
 def admin_dashboard():
     """Displays the admin dashboard with users, posts, and comments, sorted by risk."""
 
-    if session.get('username') != 'admin':
+    if session.get("username") != "admin":
         flash("You do not have permission to access this page.", "danger")
-        return redirect(url_for('feed'))
+        return redirect(url_for("feed"))
 
-    RISK_LEVELS = { "HIGH": 5, "MEDIUM": 3, "LOW": 1 }
+    RISK_LEVELS = {"HIGH": 5, "MEDIUM": 3, "LOW": 1}
     PAGE_SIZE = 50
 
     def get_risk_profile(score):
@@ -818,169 +1056,181 @@ def admin_dashboard():
 
     # Get pagination and current tab parameters
     try:
-        users_page = int(request.args.get('users_page', 1))
-        posts_page = int(request.args.get('posts_page', 1))
-        comments_page = int(request.args.get('comments_page', 1))
+        users_page = int(request.args.get("users_page", 1))
+        posts_page = int(request.args.get("posts_page", 1))
+        comments_page = int(request.args.get("comments_page", 1))
     except ValueError:
         users_page = 1
         posts_page = 1
         comments_page = 1
-    
-    current_tab = request.args.get('tab', 'users') # Default to 'users' tab
+
+    current_tab = request.args.get("tab", "users")  # Default to 'users' tab
 
     users_offset = (users_page - 1) * PAGE_SIZE
-    
+
     # First, get all users to calculate risk, then apply pagination in Python
     # It's more complex to do this efficiently in SQL if risk calc is Python-side
-    all_users_raw = query_db('SELECT id, username, profile, created_at FROM users')
+    all_users_raw = query_db("SELECT id, username, profile, created_at FROM users")
     all_users = []
     for user in all_users_raw:
         user_dict = dict(user)
-        user_risk_score = user_risk_analysis(user_dict['id'])
+        user_risk_score = user_risk_analysis(user_dict["id"])
         risk_label, risk_sort_key = get_risk_profile(user_risk_score)
-        user_dict['risk_label'] = risk_label
-        user_dict['risk_sort_key'] = risk_sort_key
-        user_dict['risk_score'] = min(5.0, round(user_risk_score, 2))
+        user_dict["risk_label"] = risk_label
+        user_dict["risk_sort_key"] = risk_sort_key
+        user_dict["risk_score"] = min(5.0, round(user_risk_score, 2))
         all_users.append(user_dict)
 
-    all_users.sort(key=lambda x: x['risk_score'], reverse=True)
+    all_users.sort(key=lambda x: x["risk_score"], reverse=True)
     total_users = len(all_users)
     users = all_users[users_offset : users_offset + PAGE_SIZE]
     total_users_pages = (total_users + PAGE_SIZE - 1) // PAGE_SIZE
 
     # --- Posts Tab Data ---
     posts_offset = (posts_page - 1) * PAGE_SIZE
-    total_posts_count = query_db('SELECT COUNT(*) as count FROM posts', one=True)['count']
+    total_posts_count = query_db("SELECT COUNT(*) as count FROM posts", one=True)[
+        "count"
+    ]
     total_posts_pages = (total_posts_count + PAGE_SIZE - 1) // PAGE_SIZE
 
-    posts_raw = query_db(f'''
+    posts_raw = query_db(
+        f"""
         SELECT p.id, p.content, p.created_at, u.username, u.created_at as user_created_at
         FROM posts p JOIN users u ON p.user_id = u.id
             JOIN communities c ON c.id = p.community_id
             LEFT JOIN user_community uc ON uc.community_id = p.community_id AND uc.user_id = p.user_id
         ORDER BY p.id DESC -- Order by ID for consistent pagination before risk sort
         LIMIT ? OFFSET ?
-    ''', (PAGE_SIZE, posts_offset))
+    """,
+        (PAGE_SIZE, posts_offset),
+    )
     posts = []
     for post in posts_raw:
         post_dict = dict(post)
-        _, base_score = moderate_content(post_dict['content'])
-        final_score = base_score 
-        author_created_dt = post_dict['user_created_at']
+        _, base_score = moderate_content(post_dict["content"])
+        final_score = base_score
+        author_created_dt = post_dict["user_created_at"]
         author_age_days = (datetime.utcnow() - author_created_dt).days
         if author_age_days < 7:
             final_score *= 1.5
         risk_label, risk_sort_key = get_risk_profile(final_score)
-        post_dict['risk_label'] = risk_label
-        post_dict['risk_sort_key'] = risk_sort_key
-        post_dict['risk_score'] = round(final_score, 2)
+        post_dict["risk_label"] = risk_label
+        post_dict["risk_sort_key"] = risk_sort_key
+        post_dict["risk_score"] = round(final_score, 2)
         posts.append(post_dict)
 
-    posts.sort(key=lambda x: x['risk_score'], reverse=True) # Sort after fetching and scoring
+    posts.sort(
+        key=lambda x: x["risk_score"], reverse=True
+    )  # Sort after fetching and scoring
 
     # --- Comments Tab Data ---
     comments_offset = (comments_page - 1) * PAGE_SIZE
-    total_comments_count = query_db('SELECT COUNT(*) as count FROM comments', one=True)['count']
+    total_comments_count = query_db("SELECT COUNT(*) as count FROM comments", one=True)[
+        "count"
+    ]
     total_comments_pages = (total_comments_count + PAGE_SIZE - 1) // PAGE_SIZE
 
-    comments_raw = query_db(f'''
+    comments_raw = query_db(
+        f"""
         SELECT c.id, c.content, c.created_at, u.username, u.created_at as user_created_at
         FROM comments c JOIN users u ON c.user_id = u.id
         ORDER BY c.id DESC -- Order by ID for consistent pagination before risk sort
         LIMIT ? OFFSET ?
-    ''', (PAGE_SIZE, comments_offset))
+    """,
+        (PAGE_SIZE, comments_offset),
+    )
     comments = []
     for comment in comments_raw:
         comment_dict = dict(comment)
-        _, score = moderate_content(comment_dict['content'])
-        author_created_dt = comment_dict['user_created_at']
+        _, score = moderate_content(comment_dict["content"])
+        author_created_dt = comment_dict["user_created_at"]
         author_age_days = (datetime.utcnow() - author_created_dt).days
         if author_age_days < 7:
             score *= 1.5
         risk_label, risk_sort_key = get_risk_profile(score)
-        comment_dict['risk_label'] = risk_label
-        comment_dict['risk_sort_key'] = risk_sort_key
-        comment_dict['risk_score'] = round(score, 2)
+        comment_dict["risk_label"] = risk_label
+        comment_dict["risk_sort_key"] = risk_sort_key
+        comment_dict["risk_score"] = round(score, 2)
         comments.append(comment_dict)
 
-    comments.sort(key=lambda x: x['risk_score'], reverse=True) # Sort after fetching and scoring
+    comments.sort(
+        key=lambda x: x["risk_score"], reverse=True
+    )  # Sort after fetching and scoring
+
+    return render_template(
+        "admin.html.j2",
+        users=users,
+        posts=posts,
+        comments=comments,
+        # Pagination for Users
+        users_page=users_page,
+        total_users_pages=total_users_pages,
+        users_has_next=(users_page < total_users_pages),
+        users_has_prev=(users_page > 1),
+        # Pagination for Posts
+        posts_page=posts_page,
+        total_posts_pages=total_posts_pages,
+        posts_has_next=(posts_page < total_posts_pages),
+        posts_has_prev=(posts_page > 1),
+        # Pagination for Comments
+        comments_page=comments_page,
+        total_comments_pages=total_comments_pages,
+        comments_has_next=(comments_page < total_comments_pages),
+        comments_has_prev=(comments_page > 1),
+        current_tab=current_tab,
+        PAGE_SIZE=PAGE_SIZE,
+    )
 
 
-    return render_template('admin.html.j2', 
-                           users=users, 
-                           posts=posts, 
-                           comments=comments,
-                           
-                           # Pagination for Users
-                           users_page=users_page,
-                           total_users_pages=total_users_pages,
-                           users_has_next=(users_page < total_users_pages),
-                           users_has_prev=(users_page > 1),
-
-                           # Pagination for Posts
-                           posts_page=posts_page,
-                           total_posts_pages=total_posts_pages,
-                           posts_has_next=(posts_page < total_posts_pages),
-                           posts_has_prev=(posts_page > 1),
-
-                           # Pagination for Comments
-                           comments_page=comments_page,
-                           total_comments_pages=total_comments_pages,
-                           comments_has_next=(comments_page < total_comments_pages),
-                           comments_has_prev=(comments_page > 1),
-
-                           current_tab=current_tab,
-                           PAGE_SIZE=PAGE_SIZE)
-
-
-
-@app.route('/admin/delete/user/<int:user_id>', methods=['POST'])
+@app.route("/admin/delete/user/<int:user_id>", methods=["POST"])
 def admin_delete_user(user_id):
-    if session.get('username') != 'admin':
+    if session.get("username") != "admin":
         flash("You do not have permission to perform this action.", "danger")
-        return redirect(url_for('feed'))
-        
-    if user_id == session.get('user_id'):
-        flash('You cannot delete your own account from the admin panel.', 'danger')
-        return redirect(url_for('admin_dashboard'))
-    
+        return redirect(url_for("feed"))
+
+    if user_id == session.get("user_id"):
+        flash("You cannot delete your own account from the admin panel.", "danger")
+        return redirect(url_for("admin_dashboard"))
+
     db = get_db()
-    db.execute('DELETE FROM users WHERE id = ?', (user_id,))
+    db.execute("DELETE FROM users WHERE id = ?", (user_id,))
     db.commit()
-    flash(f'User {user_id} and all their content has been deleted.', 'success')
-    return redirect(url_for('admin_dashboard'))
+    flash(f"User {user_id} and all their content has been deleted.", "success")
+    return redirect(url_for("admin_dashboard"))
 
 
-@app.route('/admin/delete/post/<int:post_id>', methods=['POST'])
+@app.route("/admin/delete/post/<int:post_id>", methods=["POST"])
 def admin_delete_post(post_id):
-    if session.get('username') != 'admin':
+    if session.get("username") != "admin":
         flash("You do not have permission to perform this action.", "danger")
-        return redirect(url_for('feed'))
+        return redirect(url_for("feed"))
 
     db = get_db()
-    db.execute('DELETE FROM comments WHERE post_id = ?', (post_id,))
-    db.execute('DELETE FROM reactions WHERE post_id = ?', (post_id,))
-    db.execute('DELETE FROM posts WHERE id = ?', (post_id,))
+    db.execute("DELETE FROM comments WHERE post_id = ?", (post_id,))
+    db.execute("DELETE FROM reactions WHERE post_id = ?", (post_id,))
+    db.execute("DELETE FROM posts WHERE id = ?", (post_id,))
     db.commit()
-    flash(f'Post {post_id} has been deleted.', 'success')
-    return redirect(url_for('admin_dashboard'))
+    flash(f"Post {post_id} has been deleted.", "success")
+    return redirect(url_for("admin_dashboard"))
 
 
-@app.route('/admin/delete/comment/<int:comment_id>', methods=['POST'])
+@app.route("/admin/delete/comment/<int:comment_id>", methods=["POST"])
 def admin_delete_comment(comment_id):
-    if session.get('username') != 'admin':
+    if session.get("username") != "admin":
         flash("You do not have permission to perform this action.", "danger")
-        return redirect(url_for('feed'))
+        return redirect(url_for("feed"))
 
     db = get_db()
-    db.execute('DELETE FROM comments WHERE id = ?', (comment_id,))
+    db.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
     db.commit()
-    flash(f'Comment {comment_id} has been deleted.', 'success')
-    return redirect(url_for('admin_dashboard'))
+    flash(f"Comment {comment_id} has been deleted.", "success")
+    return redirect(url_for("admin_dashboard"))
 
-@app.route('/rules')
+
+@app.route("/rules")
 def rules():
-    return render_template('rules.html.j2')
+    return render_template("rules.html.j2")
+
 
 @app.template_global()
 def loop_color(user_id):
@@ -989,11 +1239,13 @@ def loop_color(user_id):
     r = int(h[0:2], 16)
     g = int(h[2:4], 16)
     b = int(h[4:6], 16)
-    return f'rgb({r % 128 + 80}, {g % 128 + 80}, {b % 128 + 80})'
+    return f"rgb({r % 128 + 80}, {g % 128 + 80}, {b % 128 + 80})"
 
 
 # ----- Functions to be implemented are below
 # Coding Assignment #2
+
+from functools import reduce
 
 # Assignment 2.2
 def user_risk_analysis(user_id):
@@ -1002,41 +1254,179 @@ def user_risk_analysis(user_id):
         user_id: The ID of the user on which we perform risk analysis.
 
     Returns:
-        A float number score showing the risk associated with this user. There are no strict rules or bounds to this score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk. (An upper bound of 5.0 is applied to this score elsewhere in the codebase) 
-        
+        A float number score showing the risk associated with this user. There are no strict rules or bounds to this score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk. (An upper bound of 5.0 is applied to this score elsewhere in the codebase)
+
         You will be able to check the scores by logging in with the administrator account:
             username: admin
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
-    
-    score = 0
 
-    return score;
+    row: sqlite3.Row = query_db(
+        "SELECT created_at, profile FROM users WHERE id = ?", (user_id,), one=True
+    )
 
-    
+    # profile_score
+    profile_score = moderate_content(row["profile"])[1]
+
+    # avg_posts_score
+    user_posts = query_db(
+        "SELECT content, created_at FROM posts WHERE user_id = ?",
+        (user_id,),
+    )
+    account_age_days = (datetime.utcnow() - row["created_at"]).days
+
+    avg_post_score = 0
+    if user_posts:
+        avg_post_score = reduce(
+            lambda acc, post: acc + moderate_content(post["content"])[1],
+            user_posts,
+            0,
+        ) / len(user_posts)
+
+    # avg_comments_score
+    user_comments = query_db(
+        "SELECT content, created_at FROM comments WHERE user_id = ?",
+        (user_id,),
+    )
+
+    avg_comments_score = 0
+    if user_comments:
+        avg_comments_score = reduce(
+            lambda acc, comment: acc + moderate_content(comment["content"])[1],
+            user_comments,
+            0,
+        ) / len(user_comments)
+
+    content_risk_score = (avg_post_score * 3) + (avg_comments_score * 1)
+
+    if  account_age_days < 7:
+        content_risk_score *= 1.5
+
+    content_risk_score += profile_score
+
+    if account_age_days < 7:
+        content_risk_score *= 1.5
+    elif account_age_days < 30:
+        content_risk_score *= 1.2
+
+    return min(5.0, content_risk_score)
+
 # Assignment 2.1
+def severe_matches(content):
+    matches = []
+    for phrase in TIER1_WORDS + TIER2_PHRASES:
+        if phrase:
+            matches.extend((m.start(), m.end()) for m in re.finditer(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)", content, re.IGNORECASE))
+    return sorted(matches)
+
+
+def tier3_pattern():
+    words = [re.escape(word) for word in TIER3_WORDS if word]
+    pattern = r"(?<!\w)(?:" + "|".join(words) + r")(?!\w)" if words else r"(?!)"
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def highlight_segments(content):
+    """Keep the original message intact while coloring each risk factor."""
+    spans = []
+    mild_pattern = tier3_pattern()
+    for phrases, color in ((TIER1_WORDS, "red"), (TIER2_PHRASES, "yellow")):
+        for phrase in phrases:
+            if phrase:
+                pattern = r"(?<!\w)" + re.escape(phrase) + r"(?!\w)"
+                spans.extend((match.start(), match.end(), color) for match in re.finditer(pattern, content, re.IGNORECASE))
+    spans.extend((match.start(), match.end(), "yellow") for match in mild_pattern.finditer(content))
+    spans.extend((match.start(), match.end(), "red") for match in re.finditer(URL_PATTERN, content))
+
+    # Capitalization is scored after mild words and links have been filtered.
+    capitalization_text = mild_pattern.sub(lambda match: "*" * len(match.group()), content)
+    capitalization_text = re.sub(URL_PATTERN, "[link removed]", capitalization_text)
+    if has_excessive_capitalization(capitalization_text):
+        spans.extend((match.start(), match.end(), "red") for match in re.finditer(r"[A-Z]+", content))
+
+    # Preserve tier 2/3 highlighting when it overlaps capitalization or links.
+    events = collections.defaultdict(collections.Counter)
+    for start, end, color in spans:
+        events[start][color] += 1
+        events[end][color] -= 1
+    events[len(content)]
+    active = collections.Counter()
+    result, pos = [], 0
+    for boundary in sorted(events):
+        color = "yellow" if active["yellow"] > 0 else "red" if active["red"] > 0 else None
+        if boundary > pos:
+            text = content[pos:boundary]
+            if result and result[-1][1] == color:
+                result[-1] = (result[-1][0] + text, color)
+            else:
+                result.append((text, color))
+        active.update(events[boundary])
+        pos = boundary
+    return result
+
+
+def has_excessive_capitalization(content):
+    letters = re.findall(r"[A-Za-z]", content)
+    return len(letters) > 15 and len(re.findall(r"[A-Z]", content)) / len(letters) > 0.7
+
+
 def moderate_content(content):
     """
     Args
         content: the text content of a post or comment to be moderated.
-        
-    Returns: 
+
+    Returns:
         A tuple containing the moderated content (string) and a severity score (float). There are no strict rules or bounds to the severity score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk.
-    
+
     This function moderates a string of content and calculates a severity score based on
     rules loaded from the 'censorship.dat' file. These are already loaded as TIER1_WORDS, TIER2_PHRASES and TIER3_WORDS. Tier 1 corresponds to strong profanity, Tier 2 to scam/spam phrases and Tier 3 to mild profanity.
-    
+
     You will be able to check the scores by logging in with the administrator account:
             username: admin
             password: admin
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
+    if content is None:
+        return None, 0.0
+
     moderated_content = content
     score = 0
-    
+    content_lower = content.lower()
+
+    found_1 = any(
+        re.search(r"(?<!\w)" + re.escape(p) + r"(?!\w)", content_lower, re.IGNORECASE)
+        for p in TIER1_WORDS
+    )
+    if found_1:
+        return "[content removed due to severe violation]", 5.0
+
+    # whole-word match for tier 2 phrases
+    found_2 = any(
+        re.search(r"(?<!\w)" + re.escape(p) + r"(?!\w)", content_lower, re.IGNORECASE)
+        for p in TIER2_PHRASES
+    )
+    if found_2:
+        return "[content removed due to spam/scam policy]", 5.0
+
+    score = 0.0
+
+    moderated_content, tier3_count = tier3_pattern().subn(
+        lambda match: "*" * len(match.group()), moderated_content
+    )
+    score += tier3_count * 2.0
+
+    link_count = len(re.findall(URL_PATTERN, moderated_content))
+    score += link_count * 2.0
+
+    moderated_content = re.sub(URL_PATTERN, "[link removed]", moderated_content)
+
+    if has_excessive_capitalization(moderated_content):
+        score += 0.5
+
     return moderated_content, score
+
 
 # Coding Assignment #3
 # Assignment 3.1
@@ -1050,11 +1440,11 @@ def recommend(user_id, filter_following):
         A list of 5 recommended posts, in reverse-chronological order.
 
     To test whether your recommendation algorithm works, let's pretend we like the DIY topic. Here are some users that often post DIY comment and a few example posts. Make sure your account did not engage with anything else. You should test your algorithm with these and see if your recommendation algorithm picks up on your interest in DIY and starts showing related content.
-    
+
     Users: @starboy99, @DancingDolphin, @blogger_bob
     Posts: 1810, 1875, 1880, 2113
-    
-    Materials: 
+
+    Materials:
     - https://www.nvidia.com/en-us/glossary/recommendation-system/
     - http://www.configworks.com/mz/handout_recsys_sac2010.pdf
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
@@ -1065,15 +1455,21 @@ def recommend(user_id, filter_following):
     where = ""
     params = ()
     if filter_following:
-        where = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id=?)"
+        where = (
+            "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id=?)"
+        )
         params = (user_id,)
     where += (" AND " if where else "WHERE ") + "c.public_id != 'wilderness'"
-    return query_db("""SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id,
+    return query_db(
+        """SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id,
         c.public_id, uc.nickname FROM posts p JOIN users u ON u.id=p.user_id
         JOIN communities c ON c.id=p.community_id LEFT JOIN user_community uc
-        ON uc.user_id=p.user_id AND uc.community_id=p.community_id """ + where +
-        " ORDER BY p.created_at DESC LIMIT 5", params)
+        ON uc.user_id=p.user_id AND uc.community_id=p.community_id """
+        + where
+        + " ORDER BY p.created_at DESC LIMIT 5",
+        params,
+    )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     app.run(debug=True, port=8080)
-

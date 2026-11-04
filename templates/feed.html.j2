@@ -70,7 +70,7 @@
   {% if session.get('user_id') and not community %}
   <div class="btn-group" role="group" aria-label="Filter posts">
     <!-- The link preserves the current_sort state -->
-    <a href="{{ url_for('community_page' if community else 'feed', public_id=community.public_id if community else None, sort=current_sort, show='all') }}" class="btn {% if current_show == 'all' %}btn-primary{% else %}btn-light{% endif %}">{{ "Communities" if current_sort == "new" else "All" }}</a>
+    <a href="{{ url_for('community_page' if community else 'feed', public_id=community.public_id if community else None, sort=current_sort, show='all') }}" class="btn {% if current_show == 'all' %}btn-primary{% else %}btn-light{% endif %}">Communities</a>
     <a href="{{ url_for('community_page' if community else 'feed', public_id=community.public_id if community else None, sort=current_sort, show='following') }}" class="btn {% if current_show == 'following' %}btn-primary{% else %}btn-light{% endif %}">Following</a>
   </div>
    {% endif %}

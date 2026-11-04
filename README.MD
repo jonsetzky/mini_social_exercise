@@ -42,3 +42,5 @@ After updating, run the communities migration again to add the community descrip
 Rerun the communities migration after updating to remove any existing wilderness memberships.
 
 After updating, rerun the communities migration to add clan tags and backfill achievements from existing activity.
+
+Rerun the communities migration to ensure that `/c/wilderness` exists for redirected posts.

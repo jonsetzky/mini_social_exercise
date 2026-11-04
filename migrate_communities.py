@@ -22,6 +22,7 @@ def migrate(db):
             community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
             nickname TEXT, PRIMARY KEY(user_id, community_id))""")
         db.execute("INSERT OR IGNORE INTO communities(public_id) VALUES ('general')")
+        db.execute("INSERT OR IGNORE INTO communities(public_id) VALUES ('wilderness')")
         db.execute("CREATE TABLE IF NOT EXISTS community_migrations (name TEXT PRIMARY KEY)")
         if not db.execute("SELECT 1 FROM community_migrations WHERE name='general_membership'").fetchone():
             db.execute("""INSERT OR IGNORE INTO user_community (user_id, community_id)

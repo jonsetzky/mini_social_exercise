@@ -1,0 +1,29 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<dialog id="post-warning" open class="post-warning card shadow-sm" aria-labelledby="warning-title" aria-describedby="warning-description" style="position: static">
+  <div class="card-body">
+    <h1 id="warning-title" class="h4 mb-3">Review your post</h1>
+    {% if not unavailable %}
+    <div id="warning-description" class="alert alert-warning post-warning-notice"><strong>Your post was flagged.</strong><br>If you choose to post, your original message will appear in /c/wilderness.</div>
+    <section class="post-warning-review" aria-labelledby="review-heading">
+      <h2 id="review-heading" class="h6">Your message</h2>
+      <p class="small text-muted">Red: tier 1 words, links and excessive capitalization. Yellow: tier 2 phrases and tier 3 words.</p>
+      <pre class="post-warning-message"><code>{% for text, color in segments %}{% if color %}<mark class="risk-{{ color }}">{{ text|e }}</mark>{% else %}{{ text|e }}{% endif %}{% endfor %}</code></pre>
+    </section>
+    {% else %}<div id="warning-description" class="alert alert-warning">Wilderness is unavailable. Your post was not created.</div>{% endif %}
+    <div class="d-flex flex-wrap gap-2 mt-3">
+      {% if not unavailable %}<form method="post" action="{{ url_for('confirm_post') }}"><input type="hidden" name="confirmation" value="{{ confirmation }}"><button class="btn btn-danger" type="submit">Post to wilderness</button></form>{% endif %}
+      <form method="post" action="{{ url_for('edit_post_draft') }}">
+        <input type="hidden" name="community_id" value="{{ community_id|e }}">
+        <input type="hidden" name="content" value="{{ content|e }}">
+        <button class="btn btn-success" type="submit">Cancel and edit</button>
+      </form>
+    </div>
+  </div>
+</dialog>
+<script>
+  const warning = document.getElementById('post-warning');
+  warning.addEventListener('cancel', event => event.preventDefault());
+  if (warning.showModal) { warning.close(); warning.style.position = ''; warning.showModal(); }
+</script>
+{% endblock %}
