@@ -1,0 +1,13 @@
+[project]
+name = "mini-social-exercise"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "exampleName", email = "example@example.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=50.0.2",
+    "flask>=3.1.3",
+]

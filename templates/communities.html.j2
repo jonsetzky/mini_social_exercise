@@ -1,0 +1,14 @@
+{% extends "base.html.j2" %}
+{% block content %}
+<div class="col-md-8 mx-auto">
+<h1>Communities</h1>
+{% if session.get('username') == 'admin' %}
+<form method="post" action="{{ url_for('create_community') }}" class="mb-4">
+<label for="public_id">New community ID</label>
+<input id="public_id" name="public_id" pattern="[a-z]{3,33}" minlength="3" maxlength="33" required>
+<button class="btn btn-primary">Create community</button>
+</form>
+{% endif %}
+<ul>{% for community in communities %}<li><a href="{{ url_for('community_page', public_id=community.public_id) }}"{% if community.public_id == "wilderness" %} class="btn btn-sm wilderness-community"{% endif %}>/c/{{ community.public_id }}/</a>{% if community.public_id != "wilderness" %} ({{ community.member_count }} {{ "member" if community.member_count == 1 else "members" }}){% endif %}{% if community.description %} — {{ community.description|e }}{% endif %}</li>{% else %}<li>No communities yet.</li>{% endfor %}</ul>
+</div>
+{% endblock %}

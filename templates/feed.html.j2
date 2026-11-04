@@ -1,17 +1,48 @@
 {% extends "base.html.j2" %}
 {% block content %}
-{% from "macros/user_macros.html.j2" import user_display %}
+{% from "macros/user_macros.html.j2" import user_display with context %}
 
 <div class="align-center text-center">
   <img src="{{ url_for('static', filename='icon.png') }}" alt="Logo" style="height: 64px;" class="mb-4">
 </div>
 
+{% if community %}
+<div class="col-md-8 mx-auto mb-4">
+  <h1>/c/{{ community.public_id }}</h1>
+  {% if community.description %}<p>{{ community.description|e }}</p>{% endif %}
+  {% if session.get('username') == 'admin' %}
+  <form method="post" action="{{ url_for('community_action', public_id=community.public_id, action='description') }}" class="mb-3">
+    <label for="description">Community description</label>
+    <textarea id="description" name="description" class="form-control" maxlength="1000">{{ community.description|e }}</textarea>
+    <button class="btn btn-primary mt-2">Save description</button>
+  </form>
+  {% endif %}
+  {% if session.get('user_id') and community.public_id != 'wilderness' %}
+    {% if membership %}
+      <form method="post" action="{{ url_for('community_action', public_id=community.public_id, action='leave') }}"><button class="btn btn-secondary">Leave</button></form>
+      <form method="post" action="{{ url_for('community_action', public_id=community.public_id, action='nickname') }}" class="mt-2">
+        <label for="nickname">Community nickname</label>
+        <input id="nickname" name="nickname" maxlength="50" value="{{ membership.nickname or '' }}">
+        <button class="btn btn-primary">Save nickname</button>
+      </form>
+    {% else %}
+      <form method="post" action="{{ url_for('community_action', public_id=community.public_id, action='join') }}"><button class="btn btn-primary">Join</button></form>
+    {% endif %}
+  {% endif %}
+</div>
+{% endif %}
 {% if session.get('user_id') %}
 <div class="col-md-8 mx-auto mb-4">
   <div class="card shadow-sm">
     <div class="card-body">
       <h5 class="card-title">Create a new post</h5>
       <form action="{{ url_for('add_post') }}" method="POST">
+        <div class="mb-3">
+          <label for="community_id">Community</label>
+          <select class="form-select" name="community_id" id="community_id" required>
+            {% for item in communities %}<option value="{{ item.public_id }}" {% if community and community.id == item.id %}selected{% endif %}>/c/{{ item.public_id }}</option>{% endfor %}
+          </select>
+        </div>
         <div class="mb-3">
           <textarea class="form-control" name="content" rows="3" placeholder="What's on your mind, {{ session.get('username') }}?" required></textarea>
         </div>
@@ -29,18 +60,18 @@
 <!-- This is the 'sort' filter for New / Popular / Recommended -->
   <div class="btn-group me-5" role="group" aria-label="Sort posts">
     <!-- The link preserves the current_show state -->
-    <a href="{{ url_for('feed', sort='new', show=current_show) }}" class="btn {% if current_sort == 'new' %}btn-primary{% else %}btn-light{% endif %}">New</a>
-    <a href="{{ url_for('feed', sort='popular', show=current_show) }}" class="btn {% if current_sort == 'popular' %}btn-primary{% else %}btn-light{% endif %}">Popular</a>
-    <a href="{{ url_for('feed', sort='recommended', show=current_show) }}" class="btn {% if current_sort == 'recommended' %}btn-primary{% else %}btn-light{% endif %}">Recommended</a>
+    <a href="{{ url_for('community_page' if community else 'feed', public_id=community.public_id if community else None, sort='new', show=current_show) }}" class="btn {% if current_sort == 'new' %}btn-primary{% else %}btn-light{% endif %}">New</a>
+    <a href="{{ url_for('community_page' if community else 'feed', public_id=community.public_id if community else None, sort='popular', show=current_show) }}" class="btn {% if current_sort == 'popular' %}btn-primary{% else %}btn-light{% endif %}">Popular</a>
+    <a href="{{ url_for('community_page' if community else 'feed', public_id=community.public_id if community else None, sort='recommended', show=current_show) }}" class="btn {% if current_sort == 'recommended' %}btn-primary{% else %}btn-light{% endif %}">Recommended</a>
   </div>
 
   <!-- This is the 'show' filter for All / Following -->
   <!-- Following is only shown to logged in users -->
-  {% if session.get('user_id') %}
+  {% if session.get('user_id') and not community %}
   <div class="btn-group" role="group" aria-label="Filter posts">
     <!-- The link preserves the current_sort state -->
-    <a href="{{ url_for('feed', sort=current_sort, show='all') }}" class="btn {% if current_show == 'all' %}btn-primary{% else %}btn-light{% endif %}">All</a>
-    <a href="{{ url_for('feed', sort=current_sort, show='following') }}" class="btn {% if current_show == 'following' %}btn-primary{% else %}btn-light{% endif %}">Following</a>
+    <a href="{{ url_for('community_page' if community else 'feed', public_id=community.public_id if community else None, sort=current_sort, show='all') }}" class="btn {% if current_show == 'all' %}btn-primary{% else %}btn-light{% endif %}">{{ "Communities" if current_sort == "new" else "All" }}</a>
+    <a href="{{ url_for('community_page' if community else 'feed', public_id=community.public_id if community else None, sort=current_sort, show='following') }}" class="btn {% if current_show == 'following' %}btn-primary{% else %}btn-light{% endif %}">Following</a>
   </div>
    {% endif %}
 
@@ -54,10 +85,9 @@
       <div class="d-flex justify-content-between align-items-center">
         <h3 class="card-title mb-0">
           {% if entry.followed_poster %}
-          <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }}<span class="text-success p-1" data-toggle="tooltip" data-placement="top" title="You are following this user"> ✓ </span>
-</a>
+          {{ user_display(entry.post.username, entry.post.nickname) }}<span class="text-success p-1" data-toggle="tooltip" data-placement="top" title="You are following this user"> ✓ </span>
           {% else %}
-          <a href="/u/{{ entry.post.user_id }}">{{ user_display(entry.post.username) }} </a>
+          {{ user_display(entry.post.username, entry.post.nickname) }}
           {% endif %}
         </h3>
 
@@ -76,6 +106,7 @@
         {% endif %}
       </div>
       
+      <p><a href="{{ url_for('community_page', public_id=entry.post.public_id) }}">/c/{{ entry.post.public_id }}</a></p>
       <p class="mt-2">{{ entry.post.content }}</p>
 
       <!-- Reactions Display and Add Reaction Button -->
@@ -138,7 +169,7 @@
         <li class="card shadow-none p-2 mt-2">
           <div class="d-flex justify-content-between">
             <div>
-              <strong><a href="/u/{{ comment.username }}">{{ user_display(comment.username) }}</a></strong>
+              <strong>{{ user_display(comment.username) }}</strong>
               <p class="mb-0">{{ comment.content }}</p>
             </div>
             
@@ -185,17 +216,21 @@
   </div>
 
   {% else %}
-  <p class="text-center">No posts to display.</p>
+  {% if not community and current_sort == 'new' and current_show != 'following' %}
+    <p class="text-center">{% if session.get('user_id') %}No posts from your communities yet. <a href="{{ url_for('community_list') }}">Find communities to join</a>.{% else %}<a href="{{ url_for('login') }}">Log in</a> and join communities to see their new posts.{% endif %}</p>
+  {% else %}
+    <p class="text-center">No posts to display.</p>
+  {% endif %}
   {% endfor %}
 </div>
 
   <div class="d-flex justify-content-center align-items-center my-4">
-    <a href="{{ url_for('feed', page=page-1, sort=current_sort, show=current_show) }}"
+    <a href="{{ url_for('community_page' if community else 'feed', public_id=community.public_id if community else None, page=page-1, sort=current_sort, show=current_show) }}"
       class="btn btn-primary {% if page <= 1 %}btn-light disabled{% endif %}">
       &laquo; Previous
     </a>
     <span class="mx-3 text-muted">Page {{ page }}</span>
-    <a href="{{ url_for('feed', page=page+1, sort=current_sort, show=current_show) }}"
+    <a href="{{ url_for('community_page' if community else 'feed', public_id=community.public_id if community else None, page=page+1, sort=current_sort, show=current_show) }}"
       class="btn btn-primary {% if posts|length < per_page %}disabled{% endif %}">
       Next &raquo;
     </a>

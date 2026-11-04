@@ -1,7 +1,8 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
+from clan_tags import award_clan_tags
 import json
 import sqlite3
 import hashlib
@@ -39,6 +40,7 @@ def get_db():
             detect_types=sqlite3.PARSE_DECLTYPES
         )
         g.db.row_factory = sqlite3.Row
+        g.db.execute('PRAGMA foreign_keys = ON')
 
     return g.db
 
@@ -96,7 +98,7 @@ REACTION_TYPES = list(REACTION_EMOJIS.keys())
 
 
 @app.route('/')
-def feed():
+def feed(community=None):
     #  1. Get Pagination and Filter Parameters 
     try:
         page = int(request.args.get('page', 1))
@@ -114,19 +116,30 @@ def feed():
 
     #  2. Build the Query 
     where_clause = ""
-    if show == 'following' and current_user_id:
+    if community:
+        where_clause = "WHERE p.community_id = ?"
+        params.append(community['id'])
+    elif show == 'following':
         where_clause = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
         params.append(current_user_id)
+    elif sort not in ('popular', 'recommended'):
+        where_clause = "WHERE p.community_id IN (SELECT community_id FROM user_community WHERE user_id = ?)"
+        params.append(current_user_id)
+
+    if not community:
+        where_clause += (" AND " if where_clause else "WHERE ") + "c.public_id != 'wilderness'"
 
     # Add the pagination parameters to the query arguments
     pagination_params = (POSTS_PER_PAGE, offset)
 
     if sort == 'popular':
         query = f"""
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, c.public_id, uc.nickname,
                    IFNULL(r.total_reactions, 0) as total_reactions
             FROM posts p
             JOIN users u ON p.user_id = u.id
+            JOIN communities c ON c.id = p.community_id
+            LEFT JOIN user_community uc ON uc.community_id = p.community_id AND uc.user_id = p.user_id
             LEFT JOIN (
                 SELECT post_id, COUNT(*) as total_reactions FROM reactions GROUP BY post_id
             ) r ON p.id = r.post_id
@@ -137,12 +150,14 @@ def feed():
         final_params = params + list(pagination_params)
         posts = query_db(query, final_params)
     elif sort == 'recommended':
-        posts = recommend(current_user_id, show == 'following' and current_user_id)
+        posts = recommend(current_user_id, show == 'following') if not community else query_db('SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id, c.public_id, uc.nickname FROM posts p JOIN users u ON u.id=p.user_id JOIN communities c ON c.id=p.community_id LEFT JOIN user_community uc ON uc.user_id=p.user_id AND uc.community_id=p.community_id WHERE p.community_id=? ORDER BY p.created_at DESC LIMIT ? OFFSET ?', (community['id'], POSTS_PER_PAGE, offset))
     else:  # Default sort is 'new'
         query = f"""
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, c.public_id, uc.nickname
             FROM posts p
             JOIN users u ON p.user_id = u.id
+            JOIN communities c ON c.id = p.community_id
+            LEFT JOIN user_community uc ON uc.community_id = p.community_id AND uc.user_id = p.user_id
             {where_clause}
             ORDER BY p.created_at DESC
             LIMIT ? OFFSET ?
@@ -193,13 +208,85 @@ def feed():
 
     #  4. Render Template with Pagination Info 
     return render_template('feed.html.j2', 
-                           posts=posts_data, 
+                           posts=posts_data,
+                           communities=query_db('SELECT * FROM communities ORDER BY public_id'),
+                           community=community,
+                           membership=query_db('SELECT * FROM user_community WHERE user_id=? AND community_id=?', (current_user_id, community['id']), one=True) if community and current_user_id else None, 
                            current_sort=sort,
                            current_show=show,
                            page=page, # Pass current page number
                            per_page=POSTS_PER_PAGE, # Pass items per page
                            reaction_emojis=REACTION_EMOJIS,
                            reaction_types=REACTION_TYPES)
+
+
+@app.route('/c')
+def community_list():
+    return render_template('communities.html.j2', communities=query_db('SELECT c.id, c.public_id, c.description, COUNT(uc.user_id) AS member_count FROM communities c LEFT JOIN user_community uc ON uc.community_id = c.id GROUP BY c.id, c.public_id ORDER BY c.public_id'))
+
+@app.route('/c/create', methods=['POST'])
+def create_community():
+    if session.get('username') != 'admin':
+        abort(403)
+    public_id = request.form.get('public_id', '')
+    if not re.fullmatch(r'[a-z]{3,33}', public_id):
+        flash('Community ID must contain 3?33 lowercase letters.', 'warning')
+    else:
+        try:
+            get_db().execute('INSERT INTO communities(public_id) VALUES (?)', (public_id,))
+            get_db().commit()
+            flash('Community created.', 'success')
+        except sqlite3.IntegrityError:
+            get_db().rollback()
+            flash('Community already exists.', 'warning')
+    return redirect(url_for('community_list'))
+
+@app.route('/c/<public_id>')
+def community_page(public_id):
+    community = query_db('SELECT * FROM communities WHERE public_id=?', (public_id,), one=True)
+    if not community:
+        abort(404)
+    return feed(community)
+
+@app.route('/c/<public_id>/<action>', methods=['POST'])
+def community_action(public_id, action):
+    user_id = session.get('user_id')
+    if not user_id:
+        return redirect(url_for('login'))
+    community = query_db('SELECT id FROM communities WHERE public_id=?', (public_id,), one=True)
+    if not community:
+        abort(404)
+    if public_id == 'wilderness' and action in ('join', 'nickname'):
+        abort(403)
+    db = get_db()
+    if action == 'description':
+        if session.get('username') != 'admin':
+            abort(403)
+        description = request.form.get('description', '').strip()
+        if len(description) > 1000:
+            flash('Description must be at most 1000 characters.', 'warning')
+        else:
+            db.execute('UPDATE communities SET description=? WHERE id=?', (description, community['id']))
+    elif action == 'join':
+        db.execute('INSERT OR IGNORE INTO user_community(user_id, community_id) VALUES (?, ?)', (user_id, community['id']))
+    elif action == 'leave':
+        db.execute('DELETE FROM user_community WHERE user_id=? AND community_id=?', (user_id, community['id']))
+    elif action == 'nickname':
+        nickname = request.form.get('nickname', '').strip()
+        if len(nickname) > 50:
+            flash('Nickname must be at most 50 characters.', 'warning')
+        else:
+            cursor = db.execute('UPDATE user_community SET nickname=? WHERE user_id=? AND community_id=?', (nickname or None, user_id, community['id']))
+            if not cursor.rowcount:
+                abort(403)
+    else:
+        abort(404)
+    if action == 'join':
+        award_clan_tags(db)
+    elif action == 'leave':
+        db.execute('UPDATE users SET clan_tag_id=NULL WHERE id=? AND clan_tag_id=? AND username != ?', (user_id, community['id'], 'admin'))
+    db.commit()
+    return redirect(url_for('community_page', public_id=public_id))
 
 @app.route('/posts/new', methods=['POST'])
 def add_post():
@@ -214,14 +301,19 @@ def add_post():
     # Get content from the submitted form
     content = request.form.get('content')
 
+    community = query_db('SELECT id FROM communities WHERE public_id = ?', (request.form.get('community_id', ''),), one=True)
+    if not community:
+        flash('Select a valid community.', 'warning')
+        return redirect(url_for('feed'))
+
     # Pass the user's content through the moderation function
     moderated_content = content
 
     # Basic validation to ensure post is not empty
     if moderated_content and moderated_content.strip():
         db = get_db()
-        db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
+        db.execute('INSERT INTO posts (user_id, content, community_id) VALUES (?, ?, ?)',
+                   (user_id, moderated_content, community['id']))
         db.commit()
         flash('Your post was successfully created!', 'success')
     else:
@@ -268,6 +360,31 @@ def delete_post(post_id):
     # Redirect back to the page the user came from, or the feed as a fallback
     return redirect(request.referrer or url_for('feed'))
 
+@app.context_processor
+def clan_tag_context():
+    rows = query_db("SELECT u.username, c.public_id FROM users u JOIN communities c ON c.id=u.clan_tag_id") or []
+    return {'clan_tags': {row['username']: row['public_id'] for row in rows}}
+
+@app.route('/u/<username>/clan-tag', methods=['POST'])
+def select_clan_tag(username):
+    user = query_db('SELECT id, username FROM users WHERE username=?', (username,), one=True)
+    if not user:
+        abort(404)
+    if session.get('user_id') != user['id']:
+        abort(403)
+    public_id = request.form.get('community', '')
+    community = None
+    if public_id:
+        community = query_db('SELECT id FROM communities WHERE public_id=?', (public_id,), one=True)
+        if not community:
+            abort(403)
+        if user['username'] != 'admin' and not query_db('SELECT 1 FROM earned_clan_tags e JOIN user_community m ON m.user_id=e.user_id AND m.community_id=e.community_id WHERE e.user_id=? AND e.community_id=?', (user['id'], community['id']), one=True):
+            abort(403)
+    db = get_db()
+    db.execute('UPDATE users SET clan_tag_id=? WHERE id=?', (community['id'] if community else None, user['id']))
+    db.commit()
+    return redirect(url_for('user_profile', username=username))
+
 @app.route('/u/<username>')
 def user_profile(username):
     """Displays a user's profile page with moderated bio, posts, and latest comments."""
@@ -280,7 +397,7 @@ def user_profile(username):
     moderated_bio, _ = moderate_content(user.get('profile', ''))
     user['profile'] = moderated_bio
 
-    posts_raw = query_db('SELECT id, content, user_id, created_at FROM posts WHERE user_id = ? ORDER BY created_at DESC', (user['id'],))
+    posts_raw = query_db('SELECT p.id, p.content, p.user_id, p.created_at, c.public_id, uc.nickname FROM posts p JOIN communities c ON c.id=p.community_id LEFT JOIN user_community uc ON uc.community_id=p.community_id AND uc.user_id=p.user_id WHERE p.user_id = ? ORDER BY p.created_at DESC', (user['id'],))
     posts = []
     for post_raw in posts_raw:
         post = dict(post_raw)
@@ -315,7 +432,8 @@ def user_profile(username):
     # --
 
     return render_template('user_profile.html.j2', 
-                           user=user, 
+                           user=user,
+                           available_tags=(query_db('SELECT id, public_id FROM communities ORDER BY public_id') if user['username'] == 'admin' else query_db('SELECT c.id, c.public_id FROM earned_clan_tags e JOIN communities c ON c.id=e.community_id JOIN user_community m ON m.user_id=e.user_id AND m.community_id=e.community_id WHERE e.user_id=? ORDER BY c.public_id', (user['id'],))) if session.get('user_id') == user['id'] else [],
                            posts=posts, 
                            comments=comments,
                            followers_count=followers_count, 
@@ -354,9 +472,11 @@ def post_detail(post_id):
     """Displays a single post and its comments, with content moderation applied."""
     
     post_raw = query_db('''
-        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id, c.public_id, uc.nickname
         FROM posts p
         JOIN users u ON p.user_id = u.id
+            JOIN communities c ON c.id = p.community_id
+            LEFT JOIN user_community uc ON uc.community_id = p.community_id AND uc.user_id = p.user_id
         WHERE p.id = ?
     ''', (post_id,), one=True)
 
@@ -426,10 +546,12 @@ def signup():
                 'INSERT INTO users (username, password, location, birthdate, profile) VALUES (?, ?, ?, ?, ?)',
                 (username, hashed_password, location, birthdate, profile)
             )
-            db.commit()
-
-            # 1. Get the ID of the user we just created.
+            # Create the account and its default membership atomically.
             new_user_id = cur.lastrowid
+            cur.execute("INSERT INTO user_community (user_id, community_id) SELECT ?, id FROM communities WHERE public_id = 'general'", (new_user_id,))
+            if cur.rowcount != 1:
+                raise RuntimeError('General community is missing; run the communities migration.')
+            db.commit()
 
             # 2. Add user info to the session cookie.
             session.clear() # Clear any old session data
@@ -441,10 +563,10 @@ def signup():
             return redirect(url_for('feed')) # Redirect to the main feed/dashboard
 
         except sqlite3.IntegrityError:
+            db.rollback()
             flash('Username already taken. Please choose another one.', 'danger')
         finally:
             cur.close()
-            db.close()
             
     return render_template('signup.html.j2')
 
@@ -497,6 +619,7 @@ def add_comment(post_id):
         db = get_db()
         db.execute('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)',
                    (post_id, user_id, content))
+        award_clan_tags(db)
         db.commit()
         flash('Your comment was added.', 'success')
     else:
@@ -573,6 +696,7 @@ def add_reaction():
         db.execute('INSERT INTO reactions (post_id, user_id, reaction_type) VALUES (?, ?, ?)',
                    (post_id, user_id, new_reaction_type))
 
+    award_clan_tags(db)
     db.commit()
 
     return redirect(request.referrer or url_for('feed'))
@@ -732,6 +856,8 @@ def admin_dashboard():
     posts_raw = query_db(f'''
         SELECT p.id, p.content, p.created_at, u.username, u.created_at as user_created_at
         FROM posts p JOIN users u ON p.user_id = u.id
+            JOIN communities c ON c.id = p.community_id
+            LEFT JOIN user_community uc ON uc.community_id = p.community_id AND uc.user_id = p.user_id
         ORDER BY p.id DESC -- Order by ID for consistent pagination before risk sort
         LIMIT ? OFFSET ?
     ''', (PAGE_SIZE, posts_offset))
@@ -934,9 +1060,19 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
-
-    return recommended_posts;
+    # Until a recommendation model is implemented, return recent posts while
+    # respecting the same Following filter as the other feed sorts.
+    where = ""
+    params = ()
+    if filter_following:
+        where = "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id=?)"
+        params = (user_id,)
+    where += (" AND " if where else "WHERE ") + "c.public_id != 'wilderness'"
+    return query_db("""SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id,
+        c.public_id, uc.nickname FROM posts p JOIN users u ON u.id=p.user_id
+        JOIN communities c ON c.id=p.community_id LEFT JOIN user_community uc
+        ON uc.user_id=p.user_id AND uc.community_id=p.community_id """ + where +
+        " ORDER BY p.created_at DESC LIMIT 5", params)
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)

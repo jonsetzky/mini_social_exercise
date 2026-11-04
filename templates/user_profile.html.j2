@@ -1,6 +1,6 @@
 {% extends "base.html.j2" %}
 {% block content %}
-{% from "macros/user_macros.html.j2" import user_display%}
+{% from "macros/user_macros.html.j2" import user_display with context %}
 
 <div class="container mt-5">
 
@@ -9,7 +9,16 @@
     <div class="row g-0 align-items-center">
       <div class="col-md-12">
         <div class="card-body">
-          <h2 class="card-title">{{ user_display(user.username) }}</h2>
+          <h2 class="card-title">{{ user_display(user.username, show_tag=session.get('user_id') != user.id) }}
+          {% if session.get('user_id') == user.id %}
+          <form class="d-inline" method="post" action="{{ url_for('select_clan_tag', username=user.username) }}">
+            <label class="visually-hidden" for="clan-tag">Clan tag</label>
+            <select id="clan-tag" class="form-select d-inline" style="width: auto" name="community" onchange="this.form.submit()"{% if not available_tags %} disabled aria-describedby="clan-tag-rules"{% endif %}>
+              <option value="">No clan tag</option>
+              {% for tag in available_tags %}<option value="{{ tag.public_id }}" {% if user.clan_tag_id == tag.id %}selected{% endif %}>{{ tag.public_id }}</option>{% endfor %}
+            </select><script> { const selector = document.getElementById("clan-tag"); selector.style.width = (selector.getBoundingClientRect().width * 1.5) + "px"; } </script>{% if available_tags %}<noscript><button type="submit">Save tag</button></noscript>{% endif %}
+          </form>{% endif %}</h2>
+          {% if session.get('user_id') == user.id and not available_tags %}<p id="clan-tag-rules" class="small text-muted">Join a community and make 3 posts there, each with reactions or comments from 10 distinct other users, to unlock its clan tag. Wilderness does not award a tag.</p>{% endif %}
           <p class="card-text text-muted mb-3">
             <strong>Location:</strong> {{ user.location or "N/A" }}<br>
             <strong>Birthdate:</strong> {{ user.birthdate or "N/A" }}<br>
@@ -61,6 +70,7 @@
             <small class="text-muted">Posted on {{ post.created_at|datetimeformat }}</small>
           </div>
         </a>
+        <div class="px-3 pb-3">at <a href="{{ url_for('community_page', public_id=post.public_id) }}">/c/{{ post.public_id }}</a> as {{ (post.nickname or user.username)|e }}</div>
       </div>
     </div>
     {% else %}
